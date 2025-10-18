@@ -13,6 +13,16 @@
 #define TCP_MSS (1460)
 #endif
 
+// --- MEMORY OPTIMIZATION ---
+// Define the size for the BearSSL per-client I/O buffers.
+// Smaller values save a lot of RAM per connection, allowing for more
+// concurrent clients, at the cost of slightly lower throughput.
+// A value of 2048 (2KB in, 2KB out) is a good balance for an ESP8266.
+#ifndef ASYNC_TCP_SSL_BUFFER_SIZE
+#define ASYNC_TCP_SSL_BUFFER_SIZE 2048
+#endif
+// -------------------------
+
 // #define ASYNC_TCP_DEBUG(...) ets_printf(__VA_ARGS__)
 // #define TCP_SSL_DEBUG(...) ets_printf(__VA_ARGS__)
 // #define ASYNC_TCP_ASSERT( a ) do{ if(!(a)){ets_printf("ASSERT: %s %u \n", __FILE__, __LINE__);}}while(0)
