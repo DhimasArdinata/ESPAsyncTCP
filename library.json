@@ -1,19 +1,27 @@
 {
-  "name":"ESPAsyncTCP",
-  "description":"Asynchronous TCP Library for ESP8266",
-  "keywords":"async,tcp",
-  "authors":
-  {
-    "name": "ESP32Async",
-    "maintainer": true
-  },
-  "repository":
-  {
-    "type": "git",
-    "url": "https://github.com/ESP32Async/ESPAsyncTCP.git"
-  },
+  "name": "ESPAsyncTCP",
   "version": "2.0.0",
+  "description": "Asynchronous TCP Library for ESP8266 with custom BearSSL support (fork by Dhimas Ardinata).",
+  "keywords": ["async", "tcp", "ssl", "bearssl", "esp8266"],
+  "authors": [
+    {
+      "name": "ESP32Async",
+      "url": "https://github.com/ESP32Async/ESPAsyncTCP"
+    },
+    {
+      "name": "Dhimas Ardinata",
+      "url": "https://github.com/DhimasArdinata",
+      "maintainer": true
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DhimasArdinata/ESPAsyncTCP.git"
+  },
   "license": "LGPL-3.0",
-  "frameworks": "arduino",
-  "platforms": "espressif8266"
+  "frameworks": ["arduino"],
+  "platforms": ["espressif8266"],
+  "build": {
+    "srcFilter": ["+<src/>", "+<*.h>", "+<*.cpp>", "-<tests/>"]
+  }
 }
