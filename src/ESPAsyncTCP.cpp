@@ -515,6 +515,12 @@ void AsyncClient::setNoDelay(bool nodelay) {
 bool AsyncClient::getNoDelay() {
   return _pcb ? tcp_nagle_disabled(_pcb) : false;
 }
+
+// Implement missing remotePort/localPort for API compatibility
+uint16_t AsyncClient::remotePort() { return _pcb ? _pcb->remote_port : 0; }
+uint16_t AsyncClient::localPort() { return _pcb ? _pcb->local_port : 0; }
+
+// Legacy getters
 uint16_t AsyncClient::getRemotePort() { return _pcb ? _pcb->remote_port : 0; }
 uint16_t AsyncClient::getLocalPort() { return _pcb ? _pcb->local_port : 0; }
 IPAddress AsyncClient::remoteIP() {

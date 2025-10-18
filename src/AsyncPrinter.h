@@ -67,7 +67,7 @@ class AsyncPrinter : public Print {
   void onClose(ApCloseHandler cb, void* arg);
 
   operator bool();
-  AsyncPrinter& operator=(const AsyncPrinter& other);
+  AsyncPrinter& operator=(const AsyncPrinter& other) = delete;
 
   size_t write(uint8_t data);
   size_t write(const uint8_t* data, size_t len);

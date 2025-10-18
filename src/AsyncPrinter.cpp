@@ -138,25 +138,6 @@ void AsyncPrinter::_onConnect(AsyncClient* c) {
 
 AsyncPrinter::operator bool() { return connected(); }
 
-AsyncPrinter& AsyncPrinter::operator=(const AsyncPrinter& other) {
-  if (_client != nullptr) {
-    _client->close(true);
-    _client = nullptr;
-  }
-  _tx_buffer_size = other._tx_buffer_size;
-  if (_tx_buffer != nullptr) {
-    delete _tx_buffer;
-  }
-  _tx_buffer = new (std::nothrow) cbuf(other._tx_buffer_size);
-  if (_tx_buffer == nullptr) {
-    panic();
-  }
-
-  _client = other._client;
-  _attachCallbacks();
-  return *this;
-}
-
 size_t AsyncPrinter::write(uint8_t data) { return write(&data, 1); }
 
 size_t AsyncPrinter::write(const uint8_t* data, size_t len) {
@@ -169,12 +150,12 @@ size_t AsyncPrinter::write(const uint8_t* data, size_t len) {
   while (toSend > 0) {
     _sendBuffer();
 
-    while (connected() && _client->space() < _tx_buffer_size) {
-      delay(1);
-    }
-    if (!connected()) return len - toSend;
-
     toWrite = _tx_buffer->room();
+    if (toWrite == 0) {
+      // Buffer is full and we can't send more without blocking.
+      // Return the number of bytes written so far.
+      break;
+    }
     if (toWrite > toSend) toWrite = toSend;
     _tx_buffer->write((const char*)p, toWrite);
     p += toWrite;
@@ -182,7 +163,7 @@ size_t AsyncPrinter::write(const uint8_t* data, size_t len) {
   }
 
   _sendBuffer();
-  return len;
+  return len - toSend;
 }
 
 bool AsyncPrinter::connected() {
