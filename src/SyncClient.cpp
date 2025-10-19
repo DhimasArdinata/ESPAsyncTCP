@@ -134,8 +134,10 @@ int SyncClient::_connect(const IPAddress& ip, uint16_t port) {
 #else
   if (_client->connect(ip, port)) {
 #endif
+    uint32_t start = millis();
     while (_client != NULL && !_client->connected() &&
-           !_client->disconnecting())
+           !_client->disconnecting() &&
+           (millis() - start < SYNC_CLIENT_CONNECT_TIMEOUT))
       delay(1);
     return connected();
   }
@@ -162,39 +164,26 @@ int SyncClient::connect(const char* host, uint16_t port) {
 #else
   if (_client->connect(host, port)) {
 #endif
+    uint32_t start = millis();
     while (_client != NULL && !_client->connected() &&
-           !_client->disconnecting())
+           !_client->disconnecting() &&
+           (millis() - start < SYNC_CLIENT_CONNECT_TIMEOUT))
       delay(1);
     return connected();
   }
   return 0;
 }
 
-// FIX: Enabled the safer, reference-counted assignment operator
-#define SYNCCLIENT_NEW_OPERATOR_EQUAL
-#ifdef SYNCCLIENT_NEW_OPERATOR_EQUAL
-/*
-  New behavior for operator=
-
-  Allow for the object to be placed on a queue and transfered to a new container
-  with buffers still in tact. Avoiding receive data drops. Transfers rx and tx
-  buffers. Supports return by value.
-
-  Note, this is optional, the old behavior is the default.
-
-*/
 SyncClient& SyncClient::operator=(const SyncClient& other) {
   int* rhsref = other._ref;
-  ++*rhsref;  // Just in case the left and right side are the same object with
-              // different containers
+  if (rhsref) ++*rhsref;
+
   if (0 == unref()) _release();
   _ref = other._ref;
-  ref();
-  --*rhsref;
-  // Why do I not test _tx_buffer for != NULL and free?
-  // I allow for the lh target container, to be a copy of an active
-  // connection. Thus we are just reusing the container.
-  // The above unref() handles releaseing the previous client of the container.
+  if (_ref) ref();
+
+  if (rhsref) --*rhsref;
+
   _tx_buffer_size = other._tx_buffer_size;
   _tx_buffer = other._tx_buffer;
   _client = other._client;
@@ -205,34 +194,6 @@ SyncClient& SyncClient::operator=(const SyncClient& other) {
   if (_client) _attachCallbacks();
   return *this;
 }
-#else  // ! SYNCCLIENT_NEW_OPERATOR_EQUAL
-// This is the origianl logic with null checks
-SyncClient& SyncClient::operator=(const SyncClient& other) {
-  if (_client != NULL) {
-    _client->abort();
-    _client->free();
-    _client = NULL;
-  }
-  _tx_buffer_size = other._tx_buffer_size;
-  if (_tx_buffer != NULL) {
-    cbuf* b = _tx_buffer;
-    _tx_buffer = NULL;
-    delete b;
-  }
-  while (_rx_buffer != NULL) {
-    cbuf* b = _rx_buffer;
-    _rx_buffer = b->next;
-    delete b;
-  }
-  if (other._client != NULL)
-    _tx_buffer = new (std::nothrow) cbuf(other._tx_buffer_size);
-
-  _client = other._client;
-  if (_client) _attachCallbacks();
-
-  return *this;
-}
-#endif
 
 void SyncClient::setTimeout(uint32_t seconds) {
   if (_client != NULL) _client->setRxTimeout(seconds);
@@ -259,6 +220,8 @@ size_t SyncClient::_sendBuffer() {
   if (!connected() || !_client->canSend() || available == 0) return 0;
   size_t sendable = _client->space();
   if (sendable < available) available = sendable;
+
+  if (available == 0) return 0;
 
   std::unique_ptr<char[]> out(new (std::nothrow) char[available]);
   if (out == nullptr) return 0;
@@ -288,11 +251,6 @@ void SyncClient::_onData(void* data, size_t len) {
       p->next = b;
     }
   } else {
-    // We ran out of memory. This fail causes lost receive data.
-    // The connection should be closed in a manner that conveys something
-    // bad/abnormal has happened to the connection. Hence, we abort the
-    // connection to avoid possible data corruption.
-    // Note, callbacks maybe called.
     _client->abort();
   }
 }
@@ -365,15 +323,33 @@ size_t SyncClient::write(const uint8_t* data, size_t len) {
   }
   size_t toWrite = 0;
   size_t toSend = len;
-  while (_tx_buffer->room() < toSend) {
+
+  uint32_t start = millis();
+
+  while (toSend > 0) {
     toWrite = _tx_buffer->room();
-    _tx_buffer->write((const char*)data, toWrite);
-    while (connected() && !_client->canSend()) delay(0);
-    if (!connected()) return 0;
+    if (toWrite > toSend) toWrite = toSend;
+    if (toWrite > 0) {
+      _tx_buffer->write((const char*)data, toWrite);
+      data += toWrite;
+      toSend -= toWrite;
+    }
+
+    if (toSend == 0) break;
+
+    uint32_t wait_start = millis();
+    while (connected() && !_client->canSend() &&
+           (millis() - wait_start < SYNC_CLIENT_WRITE_TIMEOUT)) {
+      delay(1);
+    }
+
+    if (!connected() || millis() - start > SYNC_CLIENT_WRITE_TIMEOUT) {
+      _sendBuffer();          // Try one last send
+      return (len - toSend);  // Return bytes written so far
+    }
     _sendBuffer();
-    toSend -= toWrite;
   }
-  _tx_buffer->write((const char*)(data + (len - toSend)), toSend);
+
   if (connected() && _client->canSend()) _sendBuffer();
   return len;
 }
@@ -396,20 +372,22 @@ int SyncClient::peek() {
 
 int SyncClient::read(uint8_t* data, size_t len) {
   if (_rx_buffer == NULL) return -1;
+  if (data == nullptr) return -1;
 
   size_t readSoFar = 0;
-  while (_rx_buffer != NULL && (len - readSoFar) >= _rx_buffer->available()) {
+  while (_rx_buffer != NULL && (len - readSoFar) > 0) {
     cbuf* b = _rx_buffer;
-    _rx_buffer = _rx_buffer->next;
-    size_t toRead = b->available();
+    size_t toRead = std::min((size_t)b->available(), len - readSoFar);
+
     readSoFar += b->read((char*)(data + readSoFar), toRead);
-    if (connected()) {
-      _client->ack(b->size() - 1);
+
+    if (b->empty()) {
+      _rx_buffer = _rx_buffer->next;
+      if (connected()) {
+        _client->ack(b->size());
+      }
+      delete b;
     }
-    delete b;
-  }
-  if (_rx_buffer != NULL && readSoFar < len) {
-    readSoFar += _rx_buffer->read((char*)(data + readSoFar), (len - readSoFar));
   }
   return readSoFar;
 }
@@ -423,10 +401,12 @@ int SyncClient::read() {
 bool SyncClient::flush(unsigned int maxWaitMs) {
   (void)maxWaitMs;
   if (_tx_buffer == NULL || !connected()) return false;
-  if (_tx_buffer->available()) {
-    while (connected() && !_client->canSend()) delay(0);
-    if (_client == NULL || _tx_buffer == NULL) return false;
+
+  uint32_t start = millis();
+  while (_tx_buffer->available() > 0 && connected() &&
+         (maxWaitMs == 0 || (millis() - start < maxWaitMs))) {
     _sendBuffer();
+    delay(1);
   }
-  return true;
+  return (_tx_buffer->available() == 0);
 }

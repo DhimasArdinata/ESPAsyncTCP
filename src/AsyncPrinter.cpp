@@ -31,6 +31,7 @@ AsyncPrinter::AsyncPrinter()
       _close_arg(nullptr),
       _tx_buffer(nullptr),
       _tx_buffer_size(TCP_MSS),
+      _owns_client(true),
       next(nullptr) {}
 
 AsyncPrinter::AsyncPrinter(AsyncClient* client, size_t txBufLen)
@@ -41,12 +42,12 @@ AsyncPrinter::AsyncPrinter(AsyncClient* client, size_t txBufLen)
       _close_arg(nullptr),
       _tx_buffer(nullptr),
       _tx_buffer_size(txBufLen),
+      _owns_client(false),
       next(nullptr) {
-  _attachCallbacks();
-  _tx_buffer = new (std::nothrow) cbuf(_tx_buffer_size);
-  if (_tx_buffer == nullptr) {
-    if (_client) _client->abort();
+  if (_client) {
+    _attachCallbacks();
   }
+  _tx_buffer = new (std::nothrow) cbuf(_tx_buffer_size);
 }
 
 AsyncPrinter::~AsyncPrinter() { _on_close(); }
@@ -61,31 +62,31 @@ void AsyncPrinter::onClose(ApCloseHandler cb, void* arg) {
   _close_arg = arg;
 }
 
-// --- FIXES APPLIED HERE ---
-
 #if ASYNC_TCP_SSL_ENABLED
-// Overloads for non-secure connections when SSL is enabled
 int AsyncPrinter::connect(IPAddress ip, uint16_t port) {
   return connect(ip, port, false);
 }
 int AsyncPrinter::connect(const char* host, uint16_t port) {
   return connect(host, port, false);
 }
-// The full implementation for SSL-aware connect
 int AsyncPrinter::connect(IPAddress ip, uint16_t port, bool secure) {
 #else
-// The original implementation for non-SSL builds
 int AsyncPrinter::connect(IPAddress ip, uint16_t port) {
 #endif
-  if (_client != nullptr && connected()) return 0;
+  // If we don't own the client, we shouldn't be managing its connection
+  // lifecycle here. If we do own it and it's already connected, don't
+  // reconnect.
+  if (!_owns_client || (_client != nullptr && connected())) return 0;
+
   _client = new (std::nothrow) AsyncClient();
   if (_client == nullptr) {
-    return 0;  // Return 0 instead of panic
+    return 0;
   }
 
   _client->onConnect(
       [](void* obj, AsyncClient* c) { ((AsyncPrinter*)(obj))->_onConnect(c); },
       this);
+
   if (_client->connect(ip, port
 #if ASYNC_TCP_SSL_ENABLED
                        ,
@@ -95,6 +96,9 @@ int AsyncPrinter::connect(IPAddress ip, uint16_t port) {
     while (_client && _client->connecting()) delay(1);
     return connected();
   }
+  // Connection failed immediately, clean up.
+  delete _client;
+  _client = nullptr;
   return 0;
 }
 
@@ -103,15 +107,17 @@ int AsyncPrinter::connect(const char* host, uint16_t port, bool secure) {
 #else
 int AsyncPrinter::connect(const char* host, uint16_t port) {
 #endif
-  if (_client != nullptr && connected()) return 0;
+  if (!_owns_client || (_client != nullptr && connected())) return 0;
+
   _client = new (std::nothrow) AsyncClient();
   if (_client == nullptr) {
-    return 0;  // Return 0 instead of panic
+    return 0;
   }
 
   _client->onConnect(
       [](void* obj, AsyncClient* c) { ((AsyncPrinter*)(obj))->_onConnect(c); },
       this);
+
   if (_client->connect(host, port
 #if ASYNC_TCP_SSL_ENABLED
                        ,
@@ -121,9 +127,11 @@ int AsyncPrinter::connect(const char* host, uint16_t port) {
     while (_client && _client->connecting()) delay(1);
     return connected();
   }
+  // Connection failed immediately, clean up.
+  delete _client;
+  _client = nullptr;
   return 0;
 }
-// ----------------------------
 
 void AsyncPrinter::_onConnect(AsyncClient* c) {
   (void)c;
@@ -131,11 +139,10 @@ void AsyncPrinter::_onConnect(AsyncClient* c) {
     delete _tx_buffer;
   }
   _tx_buffer = new (std::nothrow) cbuf(_tx_buffer_size);
-  if (!_tx_buffer) {
-    if (_client) _client->abort();
+  if (!_tx_buffer && _client) {
+    _client->close(true);  // Abort if we can't allocate buffer
     return;
   }
-
   _attachCallbacks();
 }
 
@@ -152,11 +159,8 @@ size_t AsyncPrinter::write(const uint8_t* data, size_t len) {
 
   while (toSend > 0) {
     _sendBuffer();
-
     toWrite = _tx_buffer->room();
     if (toWrite == 0) {
-      // Buffer is full and we can't send more without blocking.
-      // Return the number of bytes written so far.
       break;
     }
     if (toWrite > toSend) toWrite = toSend;
@@ -164,7 +168,6 @@ size_t AsyncPrinter::write(const uint8_t* data, size_t len) {
     p += toWrite;
     toSend -= toWrite;
   }
-
   _sendBuffer();
   return len - toSend;
 }
@@ -178,11 +181,15 @@ void AsyncPrinter::close() {
 }
 
 size_t AsyncPrinter::_sendBuffer() {
+  if (_tx_buffer == nullptr || _client == nullptr) return 0;
+
   size_t available = _tx_buffer->available();
   if (!connected() || !_client->canSend() || available == 0) return 0;
 
   size_t sendable = _client->space();
   if (sendable < available) available = sendable;
+
+  if (available == 0) return 0;
 
   std::unique_ptr<char[]> out(new (std::nothrow) char[available]);
   if (out == nullptr) {
@@ -199,10 +206,13 @@ void AsyncPrinter::_onData(void* data, size_t len) {
 }
 
 void AsyncPrinter::_on_close() {
-  if (_client != nullptr) {
-    delete _client;  // The printer owns the client it creates
-    _client = nullptr;
+  // Only delete the client if we own it.
+  if (_owns_client && _client != nullptr) {
+    delete _client;
   }
+  // Detach from the client pointer in any case to avoid stale usage.
+  _client = nullptr;
+
   if (_tx_buffer != nullptr) {
     delete _tx_buffer;
     _tx_buffer = nullptr;
@@ -211,6 +221,7 @@ void AsyncPrinter::_on_close() {
 }
 
 void AsyncPrinter::_attachCallbacks() {
+  if (!_client) return;
   _client->onPoll(
       [](void* obj, AsyncClient* c) {
         (void)c;

@@ -41,6 +41,7 @@ class AsyncPrinter : public Print {
   void* _close_arg;
   cbuf* _tx_buffer;
   size_t _tx_buffer_size;
+  bool _owns_client;
 
   void _onConnect(AsyncClient* c);
 
@@ -51,7 +52,6 @@ class AsyncPrinter : public Print {
   AsyncPrinter(AsyncClient* client, size_t txBufLen = TCP_MSS);
   virtual ~AsyncPrinter();
 
-  // --- FIX: Provide correct function signatures based on SSL build flag ---
 #if ASYNC_TCP_SSL_ENABLED
   int connect(IPAddress ip, uint16_t port);
   int connect(const char* host, uint16_t port);
@@ -61,7 +61,6 @@ class AsyncPrinter : public Print {
   int connect(IPAddress ip, uint16_t port);
   int connect(const char* host, uint16_t port);
 #endif
-  // ----------------------------------------------------------------------
 
   void onData(ApDataHandler cb, void* arg);
   void onClose(ApCloseHandler cb, void* arg);
