@@ -21,7 +21,6 @@
 
 #include "ESPAsyncTCP.h"
 
-// Add missing lwIP and config headers
 #include "async_config.h"
 extern "C" {
 #include "lwip/dns.h"
@@ -112,7 +111,8 @@ AsyncClient::AsyncClient(tcp_pcb* pcb)
 #endif
 
   if (_pcb) {
-    tcp_arg(_pcb, this);
+    // This constructor is used by AsyncServer for an already-accepted PCB
+    tcp_arg(_pcb, this);  // Pass this object as the argument
     tcp_recv(_pcb, &_s_recv);
     tcp_sent(_pcb, &_s_sent);
     tcp_err(_pcb, &_s_error);
@@ -157,7 +157,6 @@ void AsyncClient::_close() {
   }
 }
 
-// FIX: Restore the missing implementation for the public close() method.
 void AsyncClient::close(bool now) {
   if (_pcb) {
     tcp_recved(_pcb, _rx_ack_len);
@@ -184,12 +183,18 @@ bool AsyncClient::connect(IPAddress ip, uint16_t port, bool secure) {
 bool AsyncClient::connect(IPAddress ip, uint16_t port) {
 #endif
   if (_pcb) return false;
-#if LWIP_IPV6
-  _pcb = tcp_new_ip_type(IP_GET_TYPE(&ip));
-#else
+
+#if LWIP_IPV6 && LWIP_IPV4
+  _pcb = tcp_new_ip_type(IP_GET_TYPE((const ip_addr_t*)&ip));
+#elif LWIP_IPV4
   _pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
+#else
+#error "TCP requires either IPv4 or IPv6."
 #endif
-  if (!_pcb) return false;
+
+  if (!_pcb) {
+    return false;
+  }
 
 #if ASYNC_TCP_SSL_ENABLED
   _pcb_secure = secure;
@@ -198,8 +203,15 @@ bool AsyncClient::connect(IPAddress ip, uint16_t port) {
 
   tcp_arg(_pcb, this);
   tcp_err(_pcb, &_s_error);
-  return tcp_connect(_pcb, (const ip_addr_t*)&ip, port,
-                     (tcp_connected_fn)&_s_connected) == ERR_OK;
+  err_t err = tcp_connect(_pcb, (const ip_addr_t*)&ip, port,
+                          (tcp_connected_fn)&_s_connected);
+  if (err != ERR_OK) {
+    tcp_abort(_pcb);
+    _pcb = nullptr;
+    _error(err);
+    return false;
+  }
+  return true;
 }
 
 #if ASYNC_TCP_SSL_ENABLED
@@ -207,17 +219,23 @@ bool AsyncClient::connect(const char* host, uint16_t port, bool secure) {
 #else
 bool AsyncClient::connect(const char* host, uint16_t port) {
 #endif
+  if (_pcb) return false;
+
   IPAddress addr;
   err_t err = dns_gethostbyname_addrtype(host, (ip_addr_t*)&addr,
                                          (dns_found_callback)&_s_dns_found,
-                                         this, LWIP_DNS_ADDRTYPE_IPV4);
-  if (err == ERR_OK)
+                                         this,  // Pass this pointer as arg
+                                         LWIP_DNS_ADDRTYPE_IPV4);
+
+  if (err == ERR_OK) {
     return connect(addr, port
 #if ASYNC_TCP_SSL_ENABLED
                    ,
                    secure
 #endif
     );
+  }
+
   if (err == ERR_INPROGRESS) {
 #if ASYNC_TCP_SSL_ENABLED
     _pcb_secure = secure;
@@ -226,6 +244,7 @@ bool AsyncClient::connect(const char* host, uint16_t port) {
     _connect_port = port;
     return true;
   }
+
   return false;
 }
 
@@ -316,13 +335,15 @@ void AsyncClient::_recv(std::shared_ptr<ACErrorTracker>& errorTracker,
     return;
   }
 #endif
-  // Fallthrough for non-SSL
   if (_pb_cb) {
     _pb_cb(_pb_cb_arg, this, pb);
   } else if (_recv_cb) {
+    // FIX: Pass total length of pbuf chain
     _recv_cb(_recv_cb_arg, this, pb->payload, pb->tot_len);
+    tcp_recved(pcb, pb->tot_len);
     pbuf_free(pb);
   } else {
+    tcp_recved(pcb, pb->tot_len);
     pbuf_free(pb);
   }
 }
@@ -330,6 +351,10 @@ void AsyncClient::_recv(std::shared_ptr<ACErrorTracker>& errorTracker,
 void AsyncClient::_poll(std::shared_ptr<ACErrorTracker>& errorTracker,
                         tcp_pcb* pcb) {
   errorTracker->setCloseError(ERR_OK);
+  if (_close_pcb) {
+    _close();
+    return;
+  }
   if (_poll_cb) _poll_cb(_poll_cb_arg, this);
 }
 
@@ -351,34 +376,45 @@ void AsyncClient::_dns_found(const ip_addr* ipaddr) {
 }
 
 err_t AsyncClient::_s_connected(void* arg, void* tpcb, err_t err) {
-  AsyncClient* c = (AsyncClient*)arg;
+  AsyncClient* c = static_cast<AsyncClient*>(arg);
+  if (!c) return ERR_ABRT;
   auto et = c->getACErrorTracker();
   c->_connected(et, tpcb, err);
   return et->getCallbackCloseError();
 }
 
 void AsyncClient::_s_error(void* arg, err_t err) {
-  AsyncClient* c = (AsyncClient*)arg;
-  c->getACErrorTracker()->setErrored(EE_ERROR_CB);
-  c->_error(err);
+  AsyncClient* c = static_cast<AsyncClient*>(arg);
+  if (c) {
+    c->getACErrorTracker()->setErrored(EE_ERROR_CB);
+    c->_error(err);
+  }
 }
 
 err_t AsyncClient::_s_sent(void* arg, tcp_pcb* tpcb, uint16_t len) {
-  AsyncClient* c = (AsyncClient*)arg;
+  AsyncClient* c = static_cast<AsyncClient*>(arg);
+  if (!c) return ERR_ABRT;
   auto et = c->getACErrorTracker();
   c->_sent(et, tpcb, len);
   return et->getCallbackCloseError();
 }
 
 err_t AsyncClient::_s_recv(void* arg, tcp_pcb* tpcb, pbuf* pb, err_t err) {
-  AsyncClient* c = (AsyncClient*)arg;
+  AsyncClient* c = static_cast<AsyncClient*>(arg);
+  if (!c) {
+    if (pb != NULL) {
+      pbuf_free(pb);
+    }
+    return ERR_ABRT;
+  }
   auto et = c->getACErrorTracker();
   c->_recv(et, tpcb, pb, err);
   return et->getCallbackCloseError();
 }
 
 err_t AsyncClient::_s_poll(void* arg, tcp_pcb* tpcb) {
-  AsyncClient* c = (AsyncClient*)arg;
+  AsyncClient* c = static_cast<AsyncClient*>(arg);
+  if (!c) return ERR_ABRT;
   auto et = c->getACErrorTracker();
   c->_poll(et, tpcb);
   return et->getCallbackCloseError();
@@ -392,22 +428,28 @@ void AsyncClient::_s_dns_found(const char* name, const ip_addr* ipaddr,
                                void* arg) {
 #endif
   (void)name;
-  ((AsyncClient*)arg)->_dns_found(ipaddr);
+  AsyncClient* c = static_cast<AsyncClient*>(arg);
+  if (c) {
+    c->_dns_found(ipaddr);
+  }
 }
 
 #if ASYNC_TCP_SSL_ENABLED
 void AsyncClient::_s_data(void* arg, struct tcp_pcb* tcp, uint8_t* data,
                           size_t len) {
-  AsyncClient* c = (AsyncClient*)arg;
-  if (c->_recv_cb) c->_recv_cb(c->_recv_cb_arg, c, data, len);
+  AsyncClient* c = static_cast<AsyncClient*>(arg);
+  if (c && c->_recv_cb) c->_recv_cb(c->_recv_cb_arg, c, data, len);
 }
 void AsyncClient::_s_handshake(void* arg, struct tcp_pcb* tcp, SSL* ssl) {
-  AsyncClient* c = (AsyncClient*)arg;
-  c->_handshake_done = true;
-  if (c->_connect_cb) c->_connect_cb(c->_connect_cb_arg, c);
+  AsyncClient* c = static_cast<AsyncClient*>(arg);
+  if (c) {
+    c->_handshake_done = true;
+    if (c->_connect_cb) c->_connect_cb(c->_connect_cb_arg, c);
+  }
 }
 void AsyncClient::_s_ssl_error(void* arg, struct tcp_pcb* tcp, int8_t err) {
-  ((AsyncClient*)arg)->_ssl_error(err);
+  AsyncClient* c = static_cast<AsyncClient*>(arg);
+  if (c) c->_ssl_error(err);
 }
 void AsyncClient::_ssl_error(int8_t err) {
   if (_error_cb) _error_cb(_error_cb_arg, this, err);
@@ -415,9 +457,7 @@ void AsyncClient::_ssl_error(int8_t err) {
 #endif
 
 void AsyncClient::stop() { close(false); }
-
 bool AsyncClient::free() { return disconnected() || disconnecting(); }
-
 bool AsyncClient::canSend() {
   return connected() && !_pcb_busy && (space() > 0);
 }
@@ -480,7 +520,6 @@ size_t AsyncClient::write(const char* data, size_t size, uint8_t apiflags) {
 size_t AsyncClient::write(const char* data) {
   return write(data, strlen(data), 0);
 }
-
 size_t AsyncClient::ack(size_t len) {
   if (_rx_ack_len == 0) return 0;
   size_t to_ack = (len > _rx_ack_len) ? _rx_ack_len : len;
@@ -493,7 +532,13 @@ uint8_t AsyncClient::state() { return _pcb ? _pcb->state : 0; }
 bool AsyncClient::connecting() {
   return _pcb && (_pcb->state > 0 && _pcb->state < ESTABLISHED);
 }
-bool AsyncClient::connected() { return _pcb && _pcb->state == ESTABLISHED; }
+bool AsyncClient::connected() {
+  return _pcb && _pcb->state == ESTABLISHED
+#if ASYNC_TCP_SSL_ENABLED
+         && _handshake_done
+#endif
+      ;
+}
 bool AsyncClient::disconnecting() { return _pcb && _pcb->state > ESTABLISHED; }
 bool AsyncClient::disconnected() { return !_pcb; }
 bool AsyncClient::freeable() { return disconnected() || disconnecting(); }
@@ -519,12 +564,8 @@ void AsyncClient::setNoDelay(bool nodelay) {
 bool AsyncClient::getNoDelay() {
   return _pcb ? tcp_nagle_disabled(_pcb) : false;
 }
-
-// Implement missing remotePort/localPort for API compatibility
 uint16_t AsyncClient::remotePort() { return _pcb ? _pcb->remote_port : 0; }
 uint16_t AsyncClient::localPort() { return _pcb ? _pcb->local_port : 0; }
-
-// Legacy getters
 uint16_t AsyncClient::getRemotePort() { return _pcb ? _pcb->remote_port : 0; }
 uint16_t AsyncClient::getLocalPort() { return _pcb ? _pcb->local_port : 0; }
 IPAddress AsyncClient::remoteIP() {
@@ -650,6 +691,7 @@ err_t AsyncServer::_accept(tcp_pcb* newpcb, err_t err) {
     AsyncClient* c = new (std::nothrow) AsyncClient(newpcb);
 #endif
     if (c) {
+      // Ownership is passed to the user via the callback
       _connect_cb(_connect_cb_arg, c);
     } else {
       tcp_abort(newpcb);

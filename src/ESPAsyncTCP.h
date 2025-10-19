@@ -43,7 +43,7 @@ extern "C" {
 #define ASYNC_TCP_USE_BEARSSL 0
 #endif
 
-// --- FIX: RESTORE ALL MISSING PUBLIC API CONSTANTS ---
+// --- PUBLIC API CONSTANTS ---
 #ifndef ASYNC_MAX_ACK_TIME
 #define ASYNC_MAX_ACK_TIME 5000
 #endif
@@ -62,7 +62,6 @@ struct tcp_pcb;
 struct ip_addr;
 
 #if ASYNC_TCP_SSL_ENABLED
-// Forward declarations for SSL types
 struct SSL;
 struct SSL_CTX;
 #endif
@@ -166,14 +165,14 @@ class AsyncClient {
   std::shared_ptr<ACErrorTracker> _errorTracker;
 
   void _close();
-  void _connected(std::shared_ptr<ACErrorTracker>& closeAbort, void* pcb,
+  void _connected(std::shared_ptr<ACErrorTracker>& errorTracker, void* pcb,
                   err_t err);
   void _error(err_t err);
 #if ASYNC_TCP_SSL_ENABLED
   void _ssl_error(int8_t err);
 #endif
-  void _poll(std::shared_ptr<ACErrorTracker>& closeAbort, tcp_pcb* pcb);
-  void _sent(std::shared_ptr<ACErrorTracker>& closeAbort, tcp_pcb* pcb,
+  void _poll(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* pcb);
+  void _sent(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* pcb,
              uint16_t len);
 #if LWIP_VERSION_MAJOR == 1
   void _dns_found(struct ip_addr* ipaddr);
@@ -197,7 +196,7 @@ class AsyncClient {
   static void _s_handshake(void* arg, struct tcp_pcb* tcp, SSL* ssl);
   static void _s_ssl_error(void* arg, struct tcp_pcb* tcp, int8_t err);
 #endif
-  void _recv(std::shared_ptr<ACErrorTracker>& closeAbort, tcp_pcb* pcb,
+  void _recv(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* pcb,
              pbuf* pb, err_t err);
 
  public:
@@ -209,13 +208,14 @@ class AsyncClient {
 #else
   AsyncClient(tcp_pcb* pcb = 0);
 #endif
-  ~AsyncClient();
+  virtual ~AsyncClient();
 
-  AsyncClient& operator=(const AsyncClient& other);
+  AsyncClient(const AsyncClient& other) = delete;
+  AsyncClient& operator=(const AsyncClient& other) = delete;
+
   AsyncClient& operator+=(const AsyncClient& other);
 
   bool operator==(const AsyncClient& other);
-
   bool operator!=(const AsyncClient& other) { return !(*this == other); }
 
 #if ASYNC_TCP_SSL_ENABLED
