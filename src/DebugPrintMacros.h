@@ -1,7 +1,7 @@
 #ifndef _DEBUG_PRINT_MACROS_H
 #define _DEBUG_PRINT_MACROS_H
 // Some customizable print macros to suite the debug needs de jour.
-
+#include <Arduino.h>
 // Debug macros
 // #include <pgmspace.h>
 // https://stackoverflow.com/questions/8487986/file-macro-shows-full-path
