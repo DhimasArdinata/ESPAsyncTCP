@@ -22,6 +22,8 @@
 
 #include <interrupts.h>
 
+#include <memory>
+
 #include "Arduino.h"
 #include "ESPAsyncTCP.h"
 #include "cbuf.h"
@@ -257,17 +259,24 @@ size_t SyncClient::_sendBuffer() {
   if (!connected() || !_client->canSend() || available == 0) return 0;
   size_t sendable = _client->space();
   if (sendable < available) available = sendable;
-  char* out = new (std::nothrow) char[available];
-  if (out == NULL) return 0;
 
-  _tx_buffer->read(out, available);
-  size_t sent = _client->write(out, available);
-  delete[] out;
+  std::unique_ptr<char[]> out(new (std::nothrow) char[available]);
+  if (out == nullptr) return 0;
+
+  _tx_buffer->read(out.get(), available);
+  size_t sent = _client->write(out.get(), available);
   return sent;
 }
 
 void SyncClient::_onData(void* data, size_t len) {
   _client->ackLater();
+
+  if (available() + len > ASYNC_TCP_MAX_RX_BUFFER) {
+    SYNC_CLIENT_DEBUG("RX buffer overflow. Aborting connection.\n");
+    _client->abort();
+    return;
+  }
+
   cbuf* b = new (std::nothrow) cbuf(len + 1);
   if (b != NULL) {
     b->write((const char*)data, len);

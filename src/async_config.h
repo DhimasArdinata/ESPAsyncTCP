@@ -23,9 +23,19 @@
 #endif
 // -------------------------
 
+// --- RX BUFFER OVERFLOW PROTECTION ---
+// Define the maximum size for the receive buffers in SyncClient and
+// AsyncTCPbuffer. If incoming data exceeds this limit, the connection will be
+// aborted to prevent memory exhaustion. Default is 64KB.
+#ifndef ASYNC_TCP_MAX_RX_BUFFER
+#define ASYNC_TCP_MAX_RX_BUFFER (1024 * 64)
+#endif
+// -----------------------------------
+
 // #define ASYNC_TCP_DEBUG(...) ets_printf(__VA_ARGS__)
 // #define TCP_SSL_DEBUG(...) ets_printf(__VA_ARGS__)
-// #define ASYNC_TCP_ASSERT( a ) do{ if(!(a)){ets_printf("ASSERT: %s %u \n", __FILE__, __LINE__);}}while(0)
+// #define ASYNC_TCP_ASSERT( a ) do{ if(!(a)){ets_printf("ASSERT: %s %u \n",
+// __FILE__, __LINE__);}}while(0)
 
 // Starting with Arduino Core 2.4.0 and up the define of DEBUG_ESP_PORT
 // can be handled through the Arduino IDE Board options instead of here.
@@ -38,13 +48,22 @@
 #include <DebugPrintMacros.h>
 
 #ifndef ASYNC_TCP_ASSERT
-#define ASYNC_TCP_ASSERT(...) do { (void)0;} while(false)
+#define ASYNC_TCP_ASSERT(...) \
+  do {                        \
+    (void)0;                  \
+  } while (false)
 #endif
 #ifndef ASYNC_TCP_DEBUG
-#define ASYNC_TCP_DEBUG(...) do { (void)0;} while(false)
+#define ASYNC_TCP_DEBUG(...) \
+  do {                       \
+    (void)0;                 \
+  } while (false)
 #endif
 #ifndef TCP_SSL_DEBUG
-#define TCP_SSL_DEBUG(...) do { (void)0;} while(false)
+#define TCP_SSL_DEBUG(...) \
+  do {                     \
+    (void)0;               \
+  } while (false)
 #endif
 
 #endif

@@ -21,6 +21,8 @@
 
 #include "AsyncPrinter.h"
 
+#include <memory>
+
 AsyncPrinter::AsyncPrinter()
     : _client(nullptr),
       _data_cb(nullptr),
@@ -43,7 +45,7 @@ AsyncPrinter::AsyncPrinter(AsyncClient* client, size_t txBufLen)
   _attachCallbacks();
   _tx_buffer = new (std::nothrow) cbuf(_tx_buffer_size);
   if (_tx_buffer == nullptr) {
-    panic();
+    if (_client) _client->abort();
   }
 }
 
@@ -78,7 +80,7 @@ int AsyncPrinter::connect(IPAddress ip, uint16_t port) {
   if (_client != nullptr && connected()) return 0;
   _client = new (std::nothrow) AsyncClient();
   if (_client == nullptr) {
-    panic();
+    return 0;  // Return 0 instead of panic
   }
 
   _client->onConnect(
@@ -104,7 +106,7 @@ int AsyncPrinter::connect(const char* host, uint16_t port) {
   if (_client != nullptr && connected()) return 0;
   _client = new (std::nothrow) AsyncClient();
   if (_client == nullptr) {
-    panic();
+    return 0;  // Return 0 instead of panic
   }
 
   _client->onConnect(
@@ -130,7 +132,8 @@ void AsyncPrinter::_onConnect(AsyncClient* c) {
   }
   _tx_buffer = new (std::nothrow) cbuf(_tx_buffer_size);
   if (!_tx_buffer) {
-    panic();
+    if (_client) _client->abort();
+    return;
   }
 
   _attachCallbacks();
@@ -181,14 +184,13 @@ size_t AsyncPrinter::_sendBuffer() {
   size_t sendable = _client->space();
   if (sendable < available) available = sendable;
 
-  char* out = new (std::nothrow) char[available];
+  std::unique_ptr<char[]> out(new (std::nothrow) char[available]);
   if (out == nullptr) {
-    panic();
+    return 0;
   }
 
-  _tx_buffer->read(out, available);
-  size_t sent = _client->write(out, available);
-  delete[] out;
+  _tx_buffer->read(out.get(), available);
+  size_t sent = _client->write(out.get(), available);
   return sent;
 }
 
