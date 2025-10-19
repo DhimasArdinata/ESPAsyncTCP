@@ -128,7 +128,7 @@ static size_t parse_certificates(const char* pem,
     size_t chunk_len = len - pushed;
     pushed += br_pem_decoder_push(&pc, data + pushed, chunk_len);
 
-    if (pctx->error) {
+    if (pctx.error) {
       for (auto& cert : certs) free(cert.data);
       certs.clear();
       return 0;
