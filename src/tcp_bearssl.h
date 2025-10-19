@@ -13,13 +13,12 @@
 struct SSL;
 struct SSL_CTX;
 
-#ifdef __cplusplus
-// These are helpers from the ESP8266 core
-#include <WiFiClientSecureBearSSL.h>
-using BearSSL::PrivateKey;
-// We no longer use X509List from the core for server contexts
-// using BearSSL::X509List;
+// FIX: Forward-declare class to avoid `using` in a header file.
+namespace BearSSL {
+class PrivateKey;
+}
 
+#ifdef __cplusplus
 extern "C" {
 #endif
 
@@ -27,15 +26,9 @@ extern "C" {
 struct BearSSL_SSL_CTX {
   // We will parse the chain into a vector of C structs ourselves
   std::vector<br_x509_certificate> chain_vector;
-  PrivateKey* pk = nullptr;
+  BearSSL::PrivateKey* pk = nullptr;
 
-  ~BearSSL_SSL_CTX() {
-    // Free the memory allocated for each certificate in the chain
-    for (auto& cert : chain_vector) {
-      free(cert.data);
-    }
-    delete pk;
-  }
+  ~BearSSL_SSL_CTX();
 };
 
 struct tcp_ssl_pcb;

@@ -50,7 +50,12 @@ AsyncPrinter::AsyncPrinter(AsyncClient* client, size_t txBufLen)
   _tx_buffer = new (std::nothrow) cbuf(_tx_buffer_size);
 }
 
-AsyncPrinter::~AsyncPrinter() { _on_close(); }
+AsyncPrinter::~AsyncPrinter() {
+  // FIX: Detach callbacks before closing to prevent use-after-free race
+  // condition.
+  _detachCallbacks();
+  _on_close();
+}
 
 void AsyncPrinter::onData(ApDataHandler cb, void* arg) {
   _data_cb = cb;
@@ -73,10 +78,14 @@ int AsyncPrinter::connect(IPAddress ip, uint16_t port, bool secure) {
 #else
 int AsyncPrinter::connect(IPAddress ip, uint16_t port) {
 #endif
-  // If we don't own the client, we shouldn't be managing its connection
-  // lifecycle here. If we do own it and it's already connected, don't
-  // reconnect.
-  if (!_owns_client || (_client != nullptr && connected())) return 0;
+  // FIX: Safely handle existing client
+  if (!_owns_client) return 0;
+  if (_client != nullptr) {
+    if (connected()) return 1;
+    _detachCallbacks();
+    delete _client;
+    _client = nullptr;
+  }
 
   _client = new (std::nothrow) AsyncClient();
   if (_client == nullptr) {
@@ -107,7 +116,13 @@ int AsyncPrinter::connect(const char* host, uint16_t port, bool secure) {
 #else
 int AsyncPrinter::connect(const char* host, uint16_t port) {
 #endif
-  if (!_owns_client || (_client != nullptr && connected())) return 0;
+  if (!_owns_client) return 0;
+  if (_client != nullptr) {
+    if (connected()) return 1;
+    _detachCallbacks();
+    delete _client;
+    _client = nullptr;
+  }
 
   _client = new (std::nothrow) AsyncClient();
   if (_client == nullptr) {
@@ -161,7 +176,11 @@ size_t AsyncPrinter::write(const uint8_t* data, size_t len) {
     _sendBuffer();
     toWrite = _tx_buffer->room();
     if (toWrite == 0) {
-      break;
+      // FIX: Add a small delay and check connection to avoid busy-looping on a
+      // full buffer
+      if (!connected()) break;
+      delay(1);
+      continue;
     }
     if (toWrite > toSend) toWrite = toSend;
     _tx_buffer->write((const char*)p, toWrite);
@@ -177,6 +196,8 @@ bool AsyncPrinter::connected() {
 }
 
 void AsyncPrinter::close() {
+  // FIX: Detach callbacks before closing to prevent race condition.
+  _detachCallbacks();
   if (_client != nullptr) _client->close(true);
 }
 
@@ -196,8 +217,12 @@ size_t AsyncPrinter::_sendBuffer() {
     return 0;
   }
 
-  _tx_buffer->read(out.get(), available);
+  // FIX: Prevent data loss with peek()->write()->remove() pattern
+  _tx_buffer->peek(out.get(), available);
   size_t sent = _client->write(out.get(), available);
+  if (sent > 0) {
+    _tx_buffer->remove(sent);
+  }
   return sent;
 }
 
@@ -218,6 +243,15 @@ void AsyncPrinter::_on_close() {
     _tx_buffer = nullptr;
   }
   if (_close_cb) _close_cb(_close_arg, this);
+}
+
+void AsyncPrinter::_detachCallbacks() {
+  if (!_client) return;
+  _client->onPoll(nullptr, nullptr);
+  _client->onAck(nullptr, nullptr);
+  _client->onDisconnect(nullptr, nullptr);
+  _client->onData(nullptr, nullptr);
+  _client->onTimeout(nullptr, nullptr);
 }
 
 void AsyncPrinter::_attachCallbacks() {

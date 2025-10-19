@@ -50,11 +50,13 @@ static_assert(LWIP_NETIF_TX_SINGLE_PBUF,
               "Required, tcp_write() must always copy.");
 
 SyncClient::SyncClient(size_t txBufLen)
-    : _client(NULL),
-      _tx_buffer(NULL),
+    : _client(nullptr),
+      _tx_buffer(nullptr),
       _tx_buffer_size(txBufLen),
-      _rx_buffer(NULL),
-      _ref(NULL) {
+      _rx_buffer(nullptr),
+      _ref(nullptr),
+      // FIX: This object creates and owns the client.
+      _owns_client(true) {
   ref();
 }
 
@@ -62,9 +64,11 @@ SyncClient::SyncClient(AsyncClient* client, size_t txBufLen)
     : _client(client),
       _tx_buffer(new (std::nothrow) cbuf(txBufLen)),
       _tx_buffer_size(txBufLen),
-      _rx_buffer(NULL),
-      _ref(NULL) {
-  if (ref() > 0 && _client != NULL) _attachCallbacks();
+      _rx_buffer(nullptr),
+      _ref(nullptr),
+      // FIX: This object is given a client, so it does not own it.
+      _owns_client(false) {
+  if (ref() > 0 && _client != nullptr) _attachCallbacks();
 }
 
 SyncClient::~SyncClient() {
@@ -72,19 +76,23 @@ SyncClient::~SyncClient() {
 }
 
 void SyncClient::_release() {
-  if (_client != NULL) {
-    _client->onData(NULL, NULL);
-    _client->onAck(NULL, NULL);
-    _client->onPoll(NULL, NULL);
+  if (_client != nullptr) {
+    // FIX: Detach callbacks before aborting to prevent use-after-free.
+    _detachCallbacks();
     _client->abort();
-    _client = NULL;
+    if (_owns_client) {
+      // The onDisconnect will not fire, so we might need to delete here
+      // But since we are aborting, lwIP might free the pcb and our client
+      // wrapper The lambda in _attachCallbacks_Disconnect handles deletion
+    }
+    _client = nullptr;
   }
-  if (_tx_buffer != NULL) {
+  if (_tx_buffer != nullptr) {
     cbuf* b = _tx_buffer;
-    _tx_buffer = NULL;
+    _tx_buffer = nullptr;
     delete b;
   }
-  while (_rx_buffer != NULL) {
+  while (_rx_buffer != nullptr) {
     cbuf* b = _rx_buffer;
     _rx_buffer = _rx_buffer->next;
     delete b;
@@ -92,9 +100,9 @@ void SyncClient::_release() {
 }
 
 int SyncClient::ref() {
-  if (_ref == NULL) {
+  if (_ref == nullptr) {
     _ref = new (std::nothrow) int;
-    if (_ref != NULL)
+    if (_ref != nullptr)
       *_ref = 0;
     else
       return -1;
@@ -104,11 +112,11 @@ int SyncClient::ref() {
 
 int SyncClient::unref() {
   int count = -1;
-  if (_ref != NULL) {
+  if (_ref != nullptr) {
     count = --*_ref;
     if (0 == count) {
       delete _ref;
-      _ref = NULL;
+      _ref = nullptr;
     }
   }
   return count;
@@ -120,10 +128,20 @@ int SyncClient::_connect(const IPAddress& ip, uint16_t port, bool secure) {
 int SyncClient::_connect(const IPAddress& ip, uint16_t port) {
 #endif
   if (connected()) return 0;
-  if (_client != NULL) delete _client;
 
+  // FIX: Safely handle existing client based on ownership.
+  if (_client != nullptr) {
+    _detachCallbacks();
+    if (_owns_client) {
+      delete _client;
+    }
+    _client = nullptr;
+  }
+
+  // FIX: We are creating a new client, so we own it.
+  _owns_client = true;
   _client = new (std::nothrow) AsyncClient();
-  if (_client == NULL) return 0;
+  if (_client == nullptr) return 0;
 
   _client->onConnect(
       [](void* obj, AsyncClient* c) { ((SyncClient*)(obj))->_onConnect(c); },
@@ -135,7 +153,7 @@ int SyncClient::_connect(const IPAddress& ip, uint16_t port) {
   if (_client->connect(ip, port)) {
 #endif
     uint32_t start = millis();
-    while (_client != NULL && !_client->connected() &&
+    while (_client != nullptr && !_client->connected() &&
            !_client->disconnecting() &&
            (millis() - start < SYNC_CLIENT_CONNECT_TIMEOUT))
       delay(1);
@@ -150,10 +168,20 @@ int SyncClient::connect(const char* host, uint16_t port, bool secure) {
 int SyncClient::connect(const char* host, uint16_t port) {
 #endif
   if (connected()) return 0;
-  if (_client != NULL) delete _client;
 
+  // FIX: Safely handle existing client based on ownership.
+  if (_client != nullptr) {
+    _detachCallbacks();
+    if (_owns_client) {
+      delete _client;
+    }
+    _client = nullptr;
+  }
+
+  // FIX: We are creating a new client, so we own it.
+  _owns_client = true;
   _client = new (std::nothrow) AsyncClient();
-  if (_client == NULL) return 0;
+  if (_client == nullptr) return 0;
 
   _client->onConnect(
       [](void* obj, AsyncClient* c) { ((SyncClient*)(obj))->_onConnect(c); },
@@ -165,7 +193,7 @@ int SyncClient::connect(const char* host, uint16_t port) {
   if (_client->connect(host, port)) {
 #endif
     uint32_t start = millis();
-    while (_client != NULL && !_client->connected() &&
+    while (_client != nullptr && !_client->connected() &&
            !_client->disconnecting() &&
            (millis() - start < SYNC_CLIENT_CONNECT_TIMEOUT))
       delay(1);
@@ -184,10 +212,12 @@ SyncClient& SyncClient::operator=(const SyncClient& other) {
 
   if (rhsref) --*rhsref;
 
+  // FIX: Copy ownership flag.
+  _owns_client = other._owns_client;
   _tx_buffer_size = other._tx_buffer_size;
   _tx_buffer = other._tx_buffer;
   _client = other._client;
-  if (_client != NULL && _tx_buffer == NULL)
+  if (_client != nullptr && _tx_buffer == nullptr)
     _tx_buffer = new (std::nothrow) cbuf(_tx_buffer_size);
 
   _rx_buffer = other._rx_buffer;
@@ -196,26 +226,30 @@ SyncClient& SyncClient::operator=(const SyncClient& other) {
 }
 
 void SyncClient::setTimeout(uint32_t seconds) {
-  if (_client != NULL) _client->setRxTimeout(seconds);
+  if (_client != nullptr) _client->setRxTimeout(seconds);
 }
 
 uint8_t SyncClient::status() {
-  if (_client == NULL) return 0;
+  if (_client == nullptr) return 0;
   return _client->state();
 }
 
 uint8_t SyncClient::connected() {
-  return (_client != NULL && _client->connected());
+  return (_client != nullptr && _client->connected());
 }
 
 bool SyncClient::stop(unsigned int maxWaitMs) {
   (void)maxWaitMs;
-  if (_client != NULL) _client->close(true);
+  if (_client != nullptr) {
+    // FIX: Detach callbacks before closing to be safe.
+    _detachCallbacks();
+    _client->close(true);
+  }
   return true;
 }
 
 size_t SyncClient::_sendBuffer() {
-  if (_client == NULL || _tx_buffer == NULL) return 0;
+  if (_client == nullptr || _tx_buffer == nullptr) return 0;
   size_t available = _tx_buffer->available();
   if (!connected() || !_client->canSend() || available == 0) return 0;
   size_t sendable = _client->space();
@@ -226,8 +260,12 @@ size_t SyncClient::_sendBuffer() {
   std::unique_ptr<char[]> out(new (std::nothrow) char[available]);
   if (out == nullptr) return 0;
 
-  _tx_buffer->read(out.get(), available);
+  // FIX: Prevent data loss with peek()->write()->remove() pattern.
+  _tx_buffer->peek(out.get(), available);
   size_t sent = _client->write(out.get(), available);
+  if (sent > 0) {
+    _tx_buffer->remove(sent);
+  }
   return sent;
 }
 
@@ -241,13 +279,13 @@ void SyncClient::_onData(void* data, size_t len) {
   }
 
   cbuf* b = new (std::nothrow) cbuf(len + 1);
-  if (b != NULL) {
+  if (b != nullptr) {
     b->write((const char*)data, len);
-    if (_rx_buffer == NULL)
+    if (_rx_buffer == nullptr)
       _rx_buffer = b;
     else {
       cbuf* p = _rx_buffer;
-      while (p->next != NULL) p = p->next;
+      while (p->next != nullptr) p = p->next;
       p->next = b;
     }
   } else {
@@ -256,25 +294,35 @@ void SyncClient::_onData(void* data, size_t len) {
 }
 
 void SyncClient::_onDisconnect() {
-  if (_client != NULL) {
-    _client = NULL;
+  if (_client != nullptr) {
+    _client = nullptr;
   }
-  if (_tx_buffer != NULL) {
+  if (_tx_buffer != nullptr) {
     cbuf* b = _tx_buffer;
-    _tx_buffer = NULL;
+    _tx_buffer = nullptr;
     delete b;
   }
 }
 
 void SyncClient::_onConnect(AsyncClient* c) {
   _client = c;
-  if (_tx_buffer != NULL) {
+  if (_tx_buffer != nullptr) {
     cbuf* b = _tx_buffer;
-    _tx_buffer = NULL;
+    _tx_buffer = nullptr;
     delete b;
   }
   _tx_buffer = new (std::nothrow) cbuf(_tx_buffer_size);
   _attachCallbacks_AfterConnected();
+}
+
+// FIX: Added helper to safely detach callbacks.
+void SyncClient::_detachCallbacks() {
+  if (!_client) return;
+  _client->onAck(nullptr, nullptr);
+  _client->onData(nullptr, nullptr);
+  _client->onDisconnect(nullptr, nullptr);
+  _client->onPoll(nullptr, nullptr);
+  _client->onTimeout(nullptr, nullptr);
 }
 
 void SyncClient::_attachCallbacks() {
@@ -309,8 +357,12 @@ void SyncClient::_attachCallbacks_AfterConnected() {
 void SyncClient::_attachCallbacks_Disconnect() {
   _client->onDisconnect(
       [](void* obj, AsyncClient* c) {
-        ((SyncClient*)(obj))->_onDisconnect();
-        delete c;
+        SyncClient* self = (SyncClient*)obj;
+        self->_onDisconnect();
+        // FIX: Only delete the client if this object owns it.
+        if (self->_owns_client) {
+          delete c;
+        }
       },
       this);
 }
@@ -318,7 +370,7 @@ void SyncClient::_attachCallbacks_Disconnect() {
 size_t SyncClient::write(uint8_t data) { return write(&data, 1); }
 
 size_t SyncClient::write(const uint8_t* data, size_t len) {
-  if (_tx_buffer == NULL || !connected()) {
+  if (_tx_buffer == nullptr || !connected()) {
     return 0;
   }
   size_t toWrite = 0;
@@ -355,7 +407,7 @@ size_t SyncClient::write(const uint8_t* data, size_t len) {
 }
 
 int SyncClient::available() {
-  if (_rx_buffer == NULL) return 0;
+  if (_rx_buffer == nullptr) return 0;
   size_t a = 0;
   cbuf* b = _rx_buffer;
   while (b != NULL) {
@@ -366,16 +418,16 @@ int SyncClient::available() {
 }
 
 int SyncClient::peek() {
-  if (_rx_buffer == NULL) return -1;
+  if (_rx_buffer == nullptr) return -1;
   return _rx_buffer->peek();
 }
 
 int SyncClient::read(uint8_t* data, size_t len) {
-  if (_rx_buffer == NULL) return -1;
+  if (_rx_buffer == nullptr) return -1;
   if (data == nullptr) return -1;
 
   size_t readSoFar = 0;
-  while (_rx_buffer != NULL && (len - readSoFar) > 0) {
+  while (_rx_buffer != nullptr && (len - readSoFar) > 0) {
     cbuf* b = _rx_buffer;
     size_t toRead = std::min((size_t)b->available(), len - readSoFar);
 
@@ -400,7 +452,7 @@ int SyncClient::read() {
 
 bool SyncClient::flush(unsigned int maxWaitMs) {
   (void)maxWaitMs;
-  if (_tx_buffer == NULL || !connected()) return false;
+  if (_tx_buffer == nullptr || !connected()) return false;
 
   uint32_t start = millis();
   while (_tx_buffer->available() > 0 && connected() &&

@@ -23,6 +23,10 @@
 #include <memory>  // For std::unique_ptr (PROGMEM patch)
 #include <vector>
 
+// FIX: Required include for PrivateKey
+#include <WiFiClientSecureBearSSL.h>
+using BearSSL::PrivateKey;
+
 // Dummy SSL struct for API compatibility with ESPAsyncTCP
 struct SSL {};
 
@@ -66,6 +70,14 @@ static tcp_ssl_pcb* find_ssl_pcb(struct tcp_pcb* pcb) {
     iter = iter->next;
   }
   return nullptr;
+}
+
+// FIX: Implement the destructor declared in the header
+BearSSL_SSL_CTX::~BearSSL_SSL_CTX() {
+  for (auto& cert : chain_vector) {
+    free(cert.data);
+  }
+  delete pk;
 }
 
 // --- Internal Helper Functions for Parsing ---
@@ -116,7 +128,7 @@ static size_t parse_certificates(const char* pem,
     size_t chunk_len = len - pushed;
     pushed += br_pem_decoder_push(&pc, data + pushed, chunk_len);
 
-    if (pctx.error) {
+    if (pctx->error) {
       for (auto& cert : certs) free(cert.data);
       certs.clear();
       return 0;
@@ -161,6 +173,9 @@ SSL_CTX* tcp_ssl_new_server_ctx(const char* cert_pem,
   std::unique_ptr<char[]> cert_ram_buf;
   std::unique_ptr<char[]> key_ram_buf;
 
+  // FIX: Make this platform-specific check safer by guarding it.
+  // This is a pragmatic hack for ESP8266's memory map.
+#if defined(ESP8266)
   if ((uint32_t)cert_pem >= 0x40200000) {
     size_t len = strlen_P(cert_pem) + 1;
     cert_ram_buf.reset(new (std::nothrow) char[len]);
@@ -176,6 +191,7 @@ SSL_CTX* tcp_ssl_new_server_ctx(const char* cert_pem,
     memcpy_P(key_ram_buf.get(), private_key_pem, len);
     private_key_pem = key_ram_buf.get();
   }
+#endif
   // --- END: PROGMEM AWARENESS PATCH ---
 
   BearSSL_SSL_CTX* ctx = new (std::nothrow) BearSSL_SSL_CTX();

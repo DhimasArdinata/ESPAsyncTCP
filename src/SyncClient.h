@@ -40,6 +40,8 @@ class SyncClient: public Client {
     size_t _tx_buffer_size;
     cbuf *_rx_buffer;
     int *_ref;
+    // FIX: Added ownership flag to prevent deleting an externally managed client.
+    bool _owns_client;
 
     size_t _sendBuffer();
     void _onData(void *data, size_t len);
@@ -48,6 +50,8 @@ class SyncClient: public Client {
     void _attachCallbacks();
     void _attachCallbacks_Disconnect();
     void _attachCallbacks_AfterConnected();
+    // FIX: Added helper to safely detach callbacks before destruction.
+    void _detachCallbacks();
     void _release();
 
   public:

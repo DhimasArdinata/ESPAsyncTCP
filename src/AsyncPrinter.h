@@ -78,6 +78,8 @@ class AsyncPrinter : public Print {
   void _onData(void* data, size_t len);
   void _on_close();
   void _attachCallbacks();
+  // FIX: Added helper to safely detach callbacks.
+  void _detachCallbacks();
 };
 
 #endif /* ASYNCPRINTER_H_ */
