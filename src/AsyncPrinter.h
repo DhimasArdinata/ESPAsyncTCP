@@ -28,56 +28,46 @@
 
 class AsyncPrinter;
 
-typedef std::function<void(void*, AsyncPrinter*, uint8_t*, size_t)>
-    ApDataHandler;
+typedef std::function<void(void*, AsyncPrinter*, uint8_t*, size_t)> ApDataHandler;
 typedef std::function<void(void*, AsyncPrinter*)> ApCloseHandler;
 
-class AsyncPrinter : public Print {
- private:
-  AsyncClient* _client;
-  ApDataHandler _data_cb;
-  void* _data_arg;
-  ApCloseHandler _close_cb;
-  void* _close_arg;
-  cbuf* _tx_buffer;
-  size_t _tx_buffer_size;
-  bool _owns_client;
+class AsyncPrinter: public Print {
+  private:
+    AsyncClient *_client;
+    ApDataHandler _data_cb;
+    void *_data_arg;
+    ApCloseHandler _close_cb;
+    void *_close_arg;
+    cbuf *_tx_buffer;
+    size_t _tx_buffer_size;
 
-  void _onConnect(AsyncClient* c);
+    void _onConnect(AsyncClient *c);
+  public:
+    AsyncPrinter *next;
 
- public:
-  AsyncPrinter* next;
+    AsyncPrinter();
+    AsyncPrinter(AsyncClient *client, size_t txBufLen = TCP_MSS);
+    virtual ~AsyncPrinter();
 
-  AsyncPrinter();
-  AsyncPrinter(AsyncClient* client, size_t txBufLen = TCP_MSS);
-  virtual ~AsyncPrinter();
+    int connect(IPAddress ip, uint16_t port);
+    int connect(const char *host, uint16_t port);
 
-#if ASYNC_TCP_SSL_ENABLED
-  int connect(IPAddress ip, uint16_t port);
-  int connect(const char* host, uint16_t port);
-  int connect(IPAddress ip, uint16_t port, bool secure);
-  int connect(const char* host, uint16_t port, bool secure);
-#else
-  int connect(IPAddress ip, uint16_t port);
-  int connect(const char* host, uint16_t port);
-#endif
+    void onData(ApDataHandler cb, void *arg);
+    void onClose(ApCloseHandler cb, void *arg);
 
-  void onData(ApDataHandler cb, void* arg);
-  void onClose(ApCloseHandler cb, void* arg);
+    operator bool();
+    AsyncPrinter & operator=(const AsyncPrinter &other);
 
-  operator bool();
-  AsyncPrinter& operator=(const AsyncPrinter& other) = delete;
+    size_t write(uint8_t data);
+    size_t write(const uint8_t *data, size_t len);
 
-  size_t write(uint8_t data);
-  size_t write(const uint8_t* data, size_t len);
+    bool connected();
+    void close();
 
-  bool connected();
-  void close();
-
-  size_t _sendBuffer();
-  void _onData(void* data, size_t len);
-  void _on_close();
-  void _attachCallbacks();
+    size_t _sendBuffer();
+    void _onData(void *data, size_t len);
+    void _on_close();
+    void _attachCallbacks();
 };
 
 #endif /* ASYNCPRINTER_H_ */

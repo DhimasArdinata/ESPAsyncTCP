@@ -5,6 +5,10 @@
 #define ASYNC_TCP_SSL_ENABLED 0
 #endif
 
+#ifndef ASYNC_TCP_SSL_BUFFER_SIZE
+#define ASYNC_TCP_SSL_BUFFER_SIZE 1024
+#endif
+
 #ifndef TCP_MSS
 // May have been definded as a -DTCP_MSS option on the compile line or not.
 // Arduino core 2.3.0 or earlier does not do the -DTCP_MSS option.
@@ -12,25 +16,6 @@
 // However, Core 2.4.0 and up board.txt does not define TCP_MSS for lwIP v1.4
 #define TCP_MSS (1460)
 #endif
-
-// --- MEMORY OPTIMIZATION ---
-// Define the size for the BearSSL per-client I/O buffers.
-// Smaller values save a lot of RAM per connection, allowing for more
-// concurrent clients, at the cost of slightly lower throughput.
-// A value of 2048 (2KB in, 2KB out) is a good balance for an ESP8266.
-#ifndef ASYNC_TCP_SSL_BUFFER_SIZE
-#define ASYNC_TCP_SSL_BUFFER_SIZE 2048
-#endif
-// -------------------------
-
-// --- RX BUFFER OVERFLOW PROTECTION ---
-// Define the maximum size for the receive buffers in SyncClient and
-// AsyncTCPbuffer. If incoming data exceeds this limit, the connection will be
-// aborted to prevent memory exhaustion. Default is 64KB.
-#ifndef ASYNC_TCP_MAX_RX_BUFFER
-#define ASYNC_TCP_MAX_RX_BUFFER (1024 * 64)
-#endif
-// -----------------------------------
 
 // #define ASYNC_TCP_DEBUG(...) ets_printf(__VA_ARGS__)
 // #define TCP_SSL_DEBUG(...) ets_printf(__VA_ARGS__)

@@ -21,231 +21,194 @@
 
 #include "AsyncPrinter.h"
 
-#include <memory>
-
 AsyncPrinter::AsyncPrinter()
-    : _client(nullptr),
-      _data_cb(nullptr),
-      _data_arg(nullptr),
-      _close_cb(nullptr),
-      _close_arg(nullptr),
-      _tx_buffer(nullptr),
-      _tx_buffer_size(TCP_MSS),
-      _owns_client(true),
-      next(nullptr) {}
+  : _client(NULL)
+  , _data_cb(NULL)
+  , _data_arg(NULL)
+  , _close_cb(NULL)
+  , _close_arg(NULL)
+  , _tx_buffer(NULL)
+  , _tx_buffer_size(TCP_MSS)
+  , next(NULL)
+{}
 
-AsyncPrinter::AsyncPrinter(AsyncClient* client, size_t txBufLen)
-    : _client(client),
-      _data_cb(nullptr),
-      _data_arg(nullptr),
-      _close_cb(nullptr),
-      _close_arg(nullptr),
-      _tx_buffer(nullptr),
-      _tx_buffer_size(txBufLen),
-      _owns_client(false),
-      next(nullptr) {
-  if (_client) {
-    _attachCallbacks();
-  }
+AsyncPrinter::AsyncPrinter(AsyncClient *client, size_t txBufLen)
+  : _client(client)
+  , _data_cb(NULL)
+  , _data_arg(NULL)
+  , _close_cb(NULL)
+  , _close_arg(NULL)
+  , _tx_buffer(NULL)
+  , _tx_buffer_size(txBufLen)
+  , next(NULL)
+{
+  _attachCallbacks();
   _tx_buffer = new (std::nothrow) cbuf(_tx_buffer_size);
+  if(_tx_buffer == NULL) {
+    panic(); //What should we do?
+  }
 }
 
-AsyncPrinter::~AsyncPrinter() { _on_close(); }
+AsyncPrinter::~AsyncPrinter(){
+  _on_close();
+}
 
-void AsyncPrinter::onData(ApDataHandler cb, void* arg) {
+void AsyncPrinter::onData(ApDataHandler cb, void *arg){
   _data_cb = cb;
   _data_arg = arg;
 }
 
-void AsyncPrinter::onClose(ApCloseHandler cb, void* arg) {
+void AsyncPrinter::onClose(ApCloseHandler cb, void *arg){
   _close_cb = cb;
   _close_arg = arg;
 }
 
-#if ASYNC_TCP_SSL_ENABLED
-int AsyncPrinter::connect(IPAddress ip, uint16_t port) {
-  return connect(ip, port, false);
-}
-int AsyncPrinter::connect(const char* host, uint16_t port) {
-  return connect(host, port, false);
-}
-int AsyncPrinter::connect(IPAddress ip, uint16_t port, bool secure) {
-#else
-int AsyncPrinter::connect(IPAddress ip, uint16_t port) {
-#endif
-  // If we don't own the client, we shouldn't be managing its connection
-  // lifecycle here. If we do own it and it's already connected, don't
-  // reconnect.
-  if (!_owns_client || (_client != nullptr && connected())) return 0;
-
-  _client = new (std::nothrow) AsyncClient();
-  if (_client == nullptr) {
+int AsyncPrinter::connect(IPAddress ip, uint16_t port){
+  if(_client != NULL && connected())
     return 0;
+  _client = new (std::nothrow) AsyncClient();
+  if (_client == NULL) {
+    panic();
   }
 
-  _client->onConnect(
-      [](void* obj, AsyncClient* c) { ((AsyncPrinter*)(obj))->_onConnect(c); },
-      this);
-
-  if (_client->connect(ip, port
-#if ASYNC_TCP_SSL_ENABLED
-                       ,
-                       secure
-#endif
-                       )) {
-    while (_client && _client->connecting()) delay(1);
+  _client->onConnect([](void *obj, AsyncClient *c){ ((AsyncPrinter*)(obj))->_onConnect(c); }, this);
+  if(_client->connect(ip, port)){
+    while(_client && _client->state() < 4)
+      delay(1);
     return connected();
   }
-  // Connection failed immediately, clean up.
-  delete _client;
-  _client = nullptr;
   return 0;
 }
 
-#if ASYNC_TCP_SSL_ENABLED
-int AsyncPrinter::connect(const char* host, uint16_t port, bool secure) {
-#else
-int AsyncPrinter::connect(const char* host, uint16_t port) {
-#endif
-  if (!_owns_client || (_client != nullptr && connected())) return 0;
-
-  _client = new (std::nothrow) AsyncClient();
-  if (_client == nullptr) {
+int AsyncPrinter::connect(const char *host, uint16_t port){
+  if(_client != NULL && connected())
     return 0;
+  _client = new (std::nothrow) AsyncClient();
+  if (_client == NULL) {
+    panic();
   }
 
-  _client->onConnect(
-      [](void* obj, AsyncClient* c) { ((AsyncPrinter*)(obj))->_onConnect(c); },
-      this);
-
-  if (_client->connect(host, port
-#if ASYNC_TCP_SSL_ENABLED
-                       ,
-                       secure
-#endif
-                       )) {
-    while (_client && _client->connecting()) delay(1);
+  _client->onConnect([](void *obj, AsyncClient *c){ ((AsyncPrinter*)(obj))->_onConnect(c); }, this);
+  if(_client->connect(host, port)){
+    while(_client && _client->state() < 4)
+      delay(1);
     return connected();
   }
-  // Connection failed immediately, clean up.
-  delete _client;
-  _client = nullptr;
   return 0;
 }
 
-void AsyncPrinter::_onConnect(AsyncClient* c) {
+void AsyncPrinter::_onConnect(AsyncClient *c){
   (void)c;
-  if (_tx_buffer != nullptr) {
-    delete _tx_buffer;
+  if(_tx_buffer != NULL){
+    cbuf *b = _tx_buffer;
+    _tx_buffer = NULL;
+    delete b;
   }
   _tx_buffer = new (std::nothrow) cbuf(_tx_buffer_size);
-  if (!_tx_buffer && _client) {
-    _client->close(true);  // Abort if we can't allocate buffer
-    return;
+  if(_tx_buffer) {
+    panic();
   }
+
   _attachCallbacks();
 }
 
-AsyncPrinter::operator bool() { return connected(); }
+AsyncPrinter::operator bool(){ return connected(); }
 
-size_t AsyncPrinter::write(uint8_t data) { return write(&data, 1); }
+AsyncPrinter & AsyncPrinter::operator=(const AsyncPrinter &other){
+  if(_client != NULL){
+    _client->close(true);
+    _client = NULL;
+  }
+  _tx_buffer_size = other._tx_buffer_size;
+  if(_tx_buffer != NULL){
+    cbuf *b = _tx_buffer;
+    _tx_buffer = NULL;
+    delete b;
+  }
+  _tx_buffer = new (std::nothrow) cbuf(other._tx_buffer_size);
+  if(_tx_buffer == NULL) {
+    panic();
+  }
 
-size_t AsyncPrinter::write(const uint8_t* data, size_t len) {
-  if (_tx_buffer == nullptr || !connected()) return 0;
+  _client = other._client;
+  _attachCallbacks();
+  return *this;
+}
 
+size_t AsyncPrinter::write(uint8_t data){
+  return write(&data, 1);
+}
+
+size_t AsyncPrinter::write(const uint8_t *data, size_t len){
+  if(_tx_buffer == NULL || !connected())
+    return 0;
   size_t toWrite = 0;
   size_t toSend = len;
-  const uint8_t* p = data;
-
-  while (toSend > 0) {
-    _sendBuffer();
+  while(_tx_buffer->room() < toSend){
     toWrite = _tx_buffer->room();
-    if (toWrite == 0) {
-      break;
-    }
-    if (toWrite > toSend) toWrite = toSend;
-    _tx_buffer->write((const char*)p, toWrite);
-    p += toWrite;
+    _tx_buffer->write((const char*)data, toWrite);
+    while(connected() && !_client->canSend())
+      delay(0);
+    if(!connected())
+      return 0; // or len - toSend;
+    _sendBuffer();
     toSend -= toWrite;
   }
+  _tx_buffer->write((const char*)(data+(len - toSend)), toSend);
+  while(connected() && !_client->canSend()) delay(0);
+  if(!connected()) return 0; // or len - toSend;
   _sendBuffer();
-  return len - toSend;
+  return len;
 }
 
-bool AsyncPrinter::connected() {
-  return (_client != nullptr && _client->connected());
+bool AsyncPrinter::connected(){
+  return (_client != NULL && _client->connected());
 }
 
-void AsyncPrinter::close() {
-  if (_client != nullptr) _client->close(true);
+void AsyncPrinter::close(){
+  if(_client != NULL)
+    _client->close(true);
 }
 
-size_t AsyncPrinter::_sendBuffer() {
-  if (_tx_buffer == nullptr || _client == nullptr) return 0;
-
+size_t AsyncPrinter::_sendBuffer(){
   size_t available = _tx_buffer->available();
-  if (!connected() || !_client->canSend() || available == 0) return 0;
-
-  size_t sendable = _client->space();
-  if (sendable < available) available = sendable;
-
-  if (available == 0) return 0;
-
-  std::unique_ptr<char[]> out(new (std::nothrow) char[available]);
-  if (out == nullptr) {
+  if(!connected() || !_client->canSend() || available == 0)
     return 0;
+  size_t sendable = _client->space();
+  if(sendable < available)
+    available= sendable;
+  char *out = new (std::nothrow) char[available];
+  if (out == NULL) {
+    panic(); // Connection should be aborted instead
   }
 
-  _tx_buffer->read(out.get(), available);
-  size_t sent = _client->write(out.get(), available);
+  _tx_buffer->read(out, available);
+  size_t sent = _client->write(out, available);
+  delete out;
   return sent;
 }
 
-void AsyncPrinter::_onData(void* data, size_t len) {
-  if (_data_cb) _data_cb(_data_arg, this, (uint8_t*)data, len);
+void AsyncPrinter::_onData(void *data, size_t len){
+  if(_data_cb)
+    _data_cb(_data_arg, this, (uint8_t*)data, len);
 }
 
-void AsyncPrinter::_on_close() {
-  // Only delete the client if we own it.
-  if (_owns_client && _client != nullptr) {
-    delete _client;
+void AsyncPrinter::_on_close(){
+  if(_client != NULL){
+    _client = NULL;
   }
-  // Detach from the client pointer in any case to avoid stale usage.
-  _client = nullptr;
-
-  if (_tx_buffer != nullptr) {
-    delete _tx_buffer;
-    _tx_buffer = nullptr;
+  if(_tx_buffer != NULL){
+    cbuf *b = _tx_buffer;
+    _tx_buffer = NULL;
+    delete b;
   }
-  if (_close_cb) _close_cb(_close_arg, this);
+  if(_close_cb)
+    _close_cb(_close_arg, this);
 }
 
-void AsyncPrinter::_attachCallbacks() {
-  if (!_client) return;
-  _client->onPoll(
-      [](void* obj, AsyncClient* c) {
-        (void)c;
-        ((AsyncPrinter*)(obj))->_sendBuffer();
-      },
-      this);
-  _client->onAck(
-      [](void* obj, AsyncClient* c, size_t len, uint32_t time) {
-        (void)c;
-        (void)len;
-        (void)time;
-        ((AsyncPrinter*)(obj))->_sendBuffer();
-      },
-      this);
-  _client->onDisconnect(
-      [](void* obj, AsyncClient* c) {
-        (void)c;
-        ((AsyncPrinter*)(obj))->_on_close();
-      },
-      this);
-  _client->onData(
-      [](void* obj, AsyncClient* c, void* data, size_t len) {
-        (void)c;
-        ((AsyncPrinter*)(obj))->_onData(data, len);
-      },
-      this);
+void AsyncPrinter::_attachCallbacks(){
+  _client->onPoll([](void *obj, AsyncClient* c){ (void)c; ((AsyncPrinter*)(obj))->_sendBuffer(); }, this);
+  _client->onAck([](void *obj, AsyncClient* c, size_t len, uint32_t time){  (void)c; (void)len; (void)time; ((AsyncPrinter*)(obj))->_sendBuffer(); }, this);
+  _client->onDisconnect([](void *obj, AsyncClient* c){ ((AsyncPrinter*)(obj))->_on_close(); delete c; }, this);
+  _client->onData([](void *obj, AsyncClient* c, void *data, size_t len){ (void)c; ((AsyncPrinter*)(obj))->_onData(data, len); }, this);
 }
