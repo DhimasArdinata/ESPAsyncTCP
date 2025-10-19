@@ -7,19 +7,23 @@
 
 #include <vector>
 
-#include "ESPAsyncTCP.h"
-#include "lwip/tcp.h"
+// FORWARD DECLARE lwIP types to avoid including lwip/tcp.h in a public header
+struct tcp_pcb;
+struct pbuf;
 
-struct SSL;
+// PROVIDE FULL DEFINITION for the dummy SSL struct
+// This resolves the "incomplete type" error.
+struct SSL {};
+
+// FORWARD DECLARE the main context struct
 struct SSL_CTX;
 
-#ifdef __cplusplus
-// These are helpers from the ESP8266 core
-#include <WiFiClientSecureBearSSL.h>
-using BearSSL::PrivateKey;
-// We no longer use X509List from the core for server contexts
-// using BearSSL::X509List;
+// FIX: Forward-declare class to avoid `using` in a header file.
+namespace BearSSL {
+class PrivateKey;
+}
 
+#ifdef __cplusplus
 extern "C" {
 #endif
 
@@ -27,23 +31,14 @@ extern "C" {
 struct BearSSL_SSL_CTX {
   // We will parse the chain into a vector of C structs ourselves
   std::vector<br_x509_certificate> chain_vector;
-  PrivateKey* pk = nullptr;
-
-  ~BearSSL_SSL_CTX() {
-    // Free the memory allocated for each certificate in the chain
-    for (auto& cert : chain_vector) {
-      free(cert.data);
-    }
-    delete pk;
-  }
+  BearSSL::PrivateKey* pk = nullptr;
+  ~BearSSL_SSL_CTX();
 };
 
 struct tcp_ssl_pcb;
 
-typedef void (*tcp_ssl_data_cb_t)(void* arg, struct tcp_pcb* tcp, uint8_t* data,
-                                  size_t len);
-typedef void (*tcp_ssl_handshake_cb_t)(void* arg, struct tcp_pcb* tcp,
-                                       SSL* ssl);
+typedef void (*tcp_ssl_data_cb_t)(void* arg, struct tcp_pcb* tcp, uint8_t* data, size_t len);
+typedef void (*tcp_ssl_handshake_cb_t)(void* arg, struct tcp_pcb* tcp, SSL* ssl);
 typedef void (*tcp_ssl_error_cb_t)(void* arg, struct tcp_pcb* tcp, int8_t err);
 
 SSL_CTX* tcp_ssl_new_server_ctx(const char* cert, const char* private_key_file,

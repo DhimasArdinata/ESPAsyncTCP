@@ -17,14 +17,22 @@
 
 #include "tcp_bearssl.h"
 
+#include <WiFiClientSecureBearSSL.h>
 #include <bearssl/bearssl_pem.h>
+#include <lwip/tcp.h>  // Needs to be included for pcb functions
 #include <pgmspace.h>  // For PROGMEM functions (PROGMEM patch)
 
 #include <memory>  // For std::unique_ptr (PROGMEM patch)
 #include <vector>
 
-// Dummy SSL struct for API compatibility with ESPAsyncTCP
-struct SSL {};
+#include "ESPAsyncTCP.h"  // Needs to be included here for its types
+
+BearSSL_SSL_CTX::~BearSSL_SSL_CTX() {
+  for (auto& cert : chain_vector) {
+    free(cert.data);
+  }
+  delete pk;
+}
 
 // Per-connection state for a BearSSL session
 struct tcp_ssl_pcb {
@@ -93,8 +101,7 @@ static void append_to_cert_vector(void* ctx, const void* data, size_t len) {
   pctx->len += len;
 }
 
-static size_t parse_certificates(const char* pem,
-                                 std::vector<br_x509_certificate>& certs) {
+static size_t parse_certificates(const char* pem, std::vector<br_x509_certificate>& certs) {
   if (!pem) return 0;
 
   const unsigned char* data = (const unsigned char*)pem;
@@ -128,8 +135,7 @@ static size_t parse_certificates(const char* pem,
       pctx.buf = nullptr;
       pctx.len = 0;
     } else if (event == BR_PEM_END_OBJ) {
-      if (pctx.buf && pctx.len > 0 &&
-          strcmp(br_pem_decoder_name(&pc), "CERTIFICATE") == 0) {
+      if (pctx.buf && pctx.len > 0 && strcmp(br_pem_decoder_name(&pc), "CERTIFICATE") == 0) {
         certs.push_back({pctx.buf, pctx.len});
       } else {
         free(pctx.buf);
@@ -149,8 +155,7 @@ static size_t parse_certificates(const char* pem,
 
 // --- Public API Implementation ---
 
-SSL_CTX* tcp_ssl_new_server_ctx(const char* cert_pem,
-                                const char* private_key_pem,
+SSL_CTX* tcp_ssl_new_server_ctx(const char* cert_pem, const char* private_key_pem,
                                 const char* password) {
   (void)password;
   if (!cert_pem || !private_key_pem) {
@@ -188,7 +193,7 @@ SSL_CTX* tcp_ssl_new_server_ctx(const char* cert_pem,
     return nullptr;
   }
 
-  ctx->pk = new (std::nothrow) PrivateKey(private_key_pem);
+  ctx->pk = new (std::nothrow) BearSSL::PrivateKey(private_key_pem);
   if (!ctx->pk) {
     delete ctx;
     return nullptr;
@@ -218,9 +223,8 @@ int tcp_ssl_new_client(struct tcp_pcb* pcb) {
 
   // --- COMPATIBILITY FIX ---
   // Use the correct function name with the correct (5) arguments.
-  br_ssl_engine_set_buffers_bidi(&ssl_pcb->sc_client.eng, ssl_pcb->inbuf,
-                                 sizeof(ssl_pcb->inbuf), ssl_pcb->outbuf,
-                                 sizeof(ssl_pcb->outbuf));
+  br_ssl_engine_set_buffers_bidi(&ssl_pcb->sc_client.eng, ssl_pcb->inbuf, sizeof(ssl_pcb->inbuf),
+                                 ssl_pcb->outbuf, sizeof(ssl_pcb->outbuf));
   // -------------------------
 
   ssl_pcb->next = tcp_ssl_pcbs;
@@ -251,9 +255,9 @@ int tcp_ssl_new_server(struct tcp_pcb* pcb, SSL_CTX* ssl_ctx) {
     br_ssl_server_init_full_rsa(&ssl_pcb->sc_server, ctx->chain_vector.data(),
                                 ctx->chain_vector.size(), ctx->pk->getRSA());
   } else if (ctx->pk && ctx->pk->getEC()) {
-    br_ssl_server_init_full_ec(
-        &ssl_pcb->sc_server, ctx->chain_vector.data(), ctx->chain_vector.size(),
-        BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN, ctx->pk->getEC());
+    br_ssl_server_init_full_ec(&ssl_pcb->sc_server, ctx->chain_vector.data(),
+                               ctx->chain_vector.size(), BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN,
+                               ctx->pk->getEC());
   } else {
     delete ssl_pcb;
     return -1;
@@ -261,9 +265,8 @@ int tcp_ssl_new_server(struct tcp_pcb* pcb, SSL_CTX* ssl_ctx) {
 
   // --- COMPATIBILITY FIX ---
   // Use the correct function name with the correct (5) arguments.
-  br_ssl_engine_set_buffers_bidi(&ssl_pcb->sc_server.eng, ssl_pcb->inbuf,
-                                 sizeof(ssl_pcb->inbuf), ssl_pcb->outbuf,
-                                 sizeof(ssl_pcb->outbuf));
+  br_ssl_engine_set_buffers_bidi(&ssl_pcb->sc_server.eng, ssl_pcb->inbuf, sizeof(ssl_pcb->inbuf),
+                                 ssl_pcb->outbuf, sizeof(ssl_pcb->outbuf));
   // -------------------------
 
   ssl_pcb->next = tcp_ssl_pcbs;
@@ -307,8 +310,7 @@ static void process_ssl_engine(tcp_ssl_pcb* ssl_pcb) {
 
     if (state & BR_SSL_CLOSED) {
       if (ssl_pcb->on_error) {
-        ssl_pcb->on_error(ssl_pcb->arg, ssl_pcb->tcp,
-                          br_ssl_engine_last_error(eng));
+        ssl_pcb->on_error(ssl_pcb->arg, ssl_pcb->tcp, br_ssl_engine_last_error(eng));
       }
       return;
     }
