@@ -5,10 +5,13 @@
 #include <bearssl/bearssl_ssl.h>
 #include <bearssl/bearssl_x509.h>
 
-#include <vector>  // Required for the new struct
+#include <vector>
 
 #include "ESPAsyncTCP.h"
 #include "lwip/tcp.h"
+
+struct SSL;
+struct SSL_CTX;
 
 #ifdef __cplusplus
 // These are helpers from the ESP8266 core
