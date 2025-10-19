@@ -1,5 +1,3 @@
-![https://avatars.githubusercontent.com/u/195753706?s=96&v=4](https://avatars.githubusercontent.com/u/195753706?s=96&v=4)
-
 # Modernized ESPAsyncTCP for ESP8266
 
 This is a modernized fork of the original ESPAsyncTCP library, a fully asynchronous TCP library for the ESP8266 Arduino core. This version has been significantly updated to provide robust, multi-connection networking with enhanced security and performance.
