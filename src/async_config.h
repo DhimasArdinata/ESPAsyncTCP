@@ -32,6 +32,14 @@
 #endif
 // -----------------------------------
 
+// --- TX BUFFER LINK LIMIT ---
+// Define the maximum number of chained cbuf segments for the transmit buffers
+// in SyncClient and AsyncTCPbuffer. This prevents uncontrolled memory growth if
+// data is written faster than it can be sent.
+#ifndef ASYNC_TCP_BUFFER_MAX_LINKS
+#define ASYNC_TCP_BUFFER_MAX_LINKS 32
+#endif
+
 // #define ASYNC_TCP_DEBUG(...) ets_printf(__VA_ARGS__)
 // #define TCP_SSL_DEBUG(...) ets_printf(__VA_ARGS__)
 // #define ASYNC_TCP_ASSERT( a ) do{ if(!(a)){ets_printf("ASSERT: %s %u \n",
