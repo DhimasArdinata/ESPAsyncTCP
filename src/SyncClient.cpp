@@ -31,7 +31,7 @@
 #define DEBUG_ESP_SYNC_CLIENT
 #if defined(DEBUG_ESP_SYNC_CLIENT) && !defined(SYNC_CLIENT_DEBUG)
 #define SYNC_CLIENT_DEBUG(format, ...) \
-  DEBUG_GENERIC_P("[SYNC_CLIENT]", format, ##__VA_ARGS__)
+  DEBUG_GENERIC_F("[SYNC_CLIENT]", format, ##__VA_ARGS__)
 #endif
 #ifndef SYNC_CLIENT_DEBUG
 #define SYNC_CLIENT_DEBUG(...) \

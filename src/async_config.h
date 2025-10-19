@@ -40,6 +40,17 @@
 #define ASYNC_TCP_BUFFER_MAX_LINKS 32
 #endif
 
+// --- SyncClient TIMEOUTS ---
+// Define timeouts for blocking operations in SyncClient to prevent
+// the application from hanging indefinitely. Values are in milliseconds.
+#ifndef SYNC_CLIENT_CONNECT_TIMEOUT
+#define SYNC_CLIENT_CONNECT_TIMEOUT 5000
+#endif
+#ifndef SYNC_CLIENT_WRITE_TIMEOUT
+#define SYNC_CLIENT_WRITE_TIMEOUT 5000
+#endif
+// ---------------------------
+
 // #define ASYNC_TCP_DEBUG(...) ets_printf(__VA_ARGS__)
 // #define TCP_SSL_DEBUG(...) ets_printf(__VA_ARGS__)
 // #define ASYNC_TCP_ASSERT( a ) do{ if(!(a)){ets_printf("ASSERT: %s %u \n",
