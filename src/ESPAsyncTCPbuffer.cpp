@@ -37,9 +37,18 @@ AsyncTCPbuffer::AsyncTCPbuffer(AsyncClient* client) {
 
   _client = client;
   _TXbufferWrite = new (std::nothrow) cbuf(TCP_MSS);
-  _TXbufferLinkCount = 1;  // We start with one buffer
+  // FIX: Add null check for allocation failure.
+  if (_TXbufferWrite == nullptr) {
+    panic();
+  }
+  _TXbufferLinkCount = 1;
   _TXbufferRead = _TXbufferWrite;
   _RXbuffer = new (std::nothrow) cbuf(100);
+  // FIX: Add null check for allocation failure.
+  if (_RXbuffer == nullptr) {
+    delete _TXbufferWrite;  // Clean up previous allocation
+    panic();
+  }
   _RXmode = ATB_RX_MODE_FREE;
   _rxSize = 0;
   _rxTerminator = 0x00;
@@ -114,16 +123,13 @@ size_t AsyncTCPbuffer::write(const uint8_t* data, size_t len) {
 
     // add new buffer since we have more data
     if (_TXbufferWrite->full() && bytesLeft > 0) {
-      // Check against the maximum number of buffer links to prevent memory
-      // exhaustion
       if (_TXbufferLinkCount >= ASYNC_TCP_BUFFER_MAX_LINKS) {
         DEBUG_ASYNC_TCP(
             "[A-TCP] TX buffer link limit reached. Cannot send all data.\n");
         return (len - bytesLeft);
       }
 
-      // Check for low memory
-      if (ESP.getFreeHeap() < 2 * TCP_MSS) {  // Increased safety margin
+      if (ESP.getFreeHeap() < 2 * TCP_MSS) {
         DEBUG_ASYNC_TCP("[A-TCP] run out of Heap can not send all Data!\n");
         return (len - bytesLeft);
       }
@@ -137,10 +143,7 @@ size_t AsyncTCPbuffer::write(const uint8_t* data, size_t len) {
         DEBUG_ASYNC_TCP("[A-TCP] new cbuf\n");
       }
 
-      // add new buffer to chain (current cbuf)
       _TXbufferWrite->next = next;
-
-      // move ptr for next data
       _TXbufferWrite = next;
       _TXbufferLinkCount++;
     }
@@ -414,7 +417,7 @@ void AsyncTCPbuffer::_rxData(uint8_t* buf, size_t len) {
   }
 
   if (!_RXbuffer->empty() && _RXmode != ATB_RX_MODE_NONE) {
-    handled = 1;  // Prime the loop
+    handled = 1;
     while (_RXmode != ATB_RX_MODE_NONE && handled != 0 && !_RXbuffer->empty()) {
       handled = _handleRxBuffer(NULL, 0);
     }

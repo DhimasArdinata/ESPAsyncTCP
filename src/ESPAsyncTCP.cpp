@@ -157,7 +157,7 @@ void AsyncClient::_close() {
   }
 }
 
-// --- THIS IS THE MISSING FUNCTION ---
+// FIX: Restore the missing implementation for the public close() method.
 void AsyncClient::close(bool now) {
   if (_pcb) {
     tcp_recved(_pcb, _rx_ack_len);
@@ -168,7 +168,6 @@ void AsyncClient::close(bool now) {
     _close_pcb = true;
   }
 }
-// ------------------------------------
 
 void AsyncClient::abort() {
   if (_pcb) {
@@ -185,7 +184,11 @@ bool AsyncClient::connect(IPAddress ip, uint16_t port, bool secure) {
 bool AsyncClient::connect(IPAddress ip, uint16_t port) {
 #endif
   if (_pcb) return false;
-  _pcb = tcp_new();
+#if LWIP_IPV6
+  _pcb = tcp_new_ip_type(IP_GET_TYPE(&ip));
+#else
+  _pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
+#endif
   if (!_pcb) return false;
 
 #if ASYNC_TCP_SSL_ENABLED
@@ -205,8 +208,9 @@ bool AsyncClient::connect(const char* host, uint16_t port, bool secure) {
 bool AsyncClient::connect(const char* host, uint16_t port) {
 #endif
   IPAddress addr;
-  err_t err = dns_gethostbyname(host, (ip_addr_t*)&addr,
-                                (dns_found_callback)&_s_dns_found, this);
+  err_t err = dns_gethostbyname_addrtype(host, (ip_addr_t*)&addr,
+                                         (dns_found_callback)&_s_dns_found,
+                                         this, LWIP_DNS_ADDRTYPE_IPV4);
   if (err == ERR_OK)
     return connect(addr, port
 #if ASYNC_TCP_SSL_ENABLED

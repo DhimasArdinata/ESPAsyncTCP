@@ -55,7 +55,6 @@ SyncClient::SyncClient(size_t txBufLen)
       _tx_buffer_size(txBufLen),
       _rx_buffer(nullptr),
       _ref(nullptr),
-      // FIX: This object creates and owns the client.
       _owns_client(true) {
   ref();
 }
@@ -66,9 +65,12 @@ SyncClient::SyncClient(AsyncClient* client, size_t txBufLen)
       _tx_buffer_size(txBufLen),
       _rx_buffer(nullptr),
       _ref(nullptr),
-      // FIX: This object is given a client, so it does not own it.
       _owns_client(false) {
   if (ref() > 0 && _client != nullptr) _attachCallbacks();
+  // FIX: Abort if allocation fails
+  if (_tx_buffer == nullptr && _client) {
+    _client->abort();
+  }
 }
 
 SyncClient::~SyncClient() {
@@ -77,14 +79,8 @@ SyncClient::~SyncClient() {
 
 void SyncClient::_release() {
   if (_client != nullptr) {
-    // FIX: Detach callbacks before aborting to prevent use-after-free.
     _detachCallbacks();
     _client->abort();
-    if (_owns_client) {
-      // The onDisconnect will not fire, so we might need to delete here
-      // But since we are aborting, lwIP might free the pcb and our client
-      // wrapper The lambda in _attachCallbacks_Disconnect handles deletion
-    }
     _client = nullptr;
   }
   if (_tx_buffer != nullptr) {
@@ -129,7 +125,6 @@ int SyncClient::_connect(const IPAddress& ip, uint16_t port) {
 #endif
   if (connected()) return 0;
 
-  // FIX: Safely handle existing client based on ownership.
   if (_client != nullptr) {
     _detachCallbacks();
     if (_owns_client) {
@@ -138,7 +133,6 @@ int SyncClient::_connect(const IPAddress& ip, uint16_t port) {
     _client = nullptr;
   }
 
-  // FIX: We are creating a new client, so we own it.
   _owns_client = true;
   _client = new (std::nothrow) AsyncClient();
   if (_client == nullptr) return 0;
@@ -169,7 +163,6 @@ int SyncClient::connect(const char* host, uint16_t port) {
 #endif
   if (connected()) return 0;
 
-  // FIX: Safely handle existing client based on ownership.
   if (_client != nullptr) {
     _detachCallbacks();
     if (_owns_client) {
@@ -178,7 +171,6 @@ int SyncClient::connect(const char* host, uint16_t port) {
     _client = nullptr;
   }
 
-  // FIX: We are creating a new client, so we own it.
   _owns_client = true;
   _client = new (std::nothrow) AsyncClient();
   if (_client == nullptr) return 0;
@@ -212,7 +204,6 @@ SyncClient& SyncClient::operator=(const SyncClient& other) {
 
   if (rhsref) --*rhsref;
 
-  // FIX: Copy ownership flag.
   _owns_client = other._owns_client;
   _tx_buffer_size = other._tx_buffer_size;
   _tx_buffer = other._tx_buffer;
@@ -241,7 +232,6 @@ uint8_t SyncClient::connected() {
 bool SyncClient::stop(unsigned int maxWaitMs) {
   (void)maxWaitMs;
   if (_client != nullptr) {
-    // FIX: Detach callbacks before closing to be safe.
     _detachCallbacks();
     _client->close(true);
   }
@@ -260,7 +250,6 @@ size_t SyncClient::_sendBuffer() {
   std::unique_ptr<char[]> out(new (std::nothrow) char[available]);
   if (out == nullptr) return 0;
 
-  // FIX: Prevent data loss with peek()->write()->remove() pattern.
   _tx_buffer->peek(out.get(), available);
   size_t sent = _client->write(out.get(), available);
   if (sent > 0) {
@@ -312,10 +301,14 @@ void SyncClient::_onConnect(AsyncClient* c) {
     delete b;
   }
   _tx_buffer = new (std::nothrow) cbuf(_tx_buffer_size);
+  // FIX: Safely handle allocation failure.
+  if (_tx_buffer == nullptr) {
+    if (_client) _client->abort();
+    return;
+  }
   _attachCallbacks_AfterConnected();
 }
 
-// FIX: Added helper to safely detach callbacks.
 void SyncClient::_detachCallbacks() {
   if (!_client) return;
   _client->onAck(nullptr, nullptr);
@@ -359,7 +352,6 @@ void SyncClient::_attachCallbacks_Disconnect() {
       [](void* obj, AsyncClient* c) {
         SyncClient* self = (SyncClient*)obj;
         self->_onDisconnect();
-        // FIX: Only delete the client if this object owns it.
         if (self->_owns_client) {
           delete c;
         }
@@ -396,8 +388,8 @@ size_t SyncClient::write(const uint8_t* data, size_t len) {
     }
 
     if (!connected() || millis() - start > SYNC_CLIENT_WRITE_TIMEOUT) {
-      _sendBuffer();          // Try one last send
-      return (len - toSend);  // Return bytes written so far
+      _sendBuffer();
+      return (len - toSend);
     }
     _sendBuffer();
   }
@@ -436,7 +428,9 @@ int SyncClient::read(uint8_t* data, size_t len) {
     if (b->empty()) {
       _rx_buffer = _rx_buffer->next;
       if (connected()) {
-        _client->ack(b->size());
+        // FIX: Acknowledge the size of the original data packet, which is
+        // `b->size() - 1` because the cbuf was allocated with `len + 1`.
+        _client->ack(b->size() - 1);
       }
       delete b;
     }
