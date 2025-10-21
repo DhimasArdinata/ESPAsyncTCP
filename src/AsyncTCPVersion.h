@@ -1,0 +1,13 @@
+#pragma once
+
+#define ASYNCTCP_VERSION_MAJOR 2
+#define ASYNCTCP_VERSION_MINOR 0
+#define ASYNCTCP_VERSION_PATCH 0
+
+// Helper macros to create a string from the version numbers
+#define ASYNCTCP_VERSION_STR_HELPER(x) #x
+#define ASYNCTCP_VERSION_STR(x) ASYNCTCP_VERSION_STR_HELPER(x)
+
+#define ASYNCTCP_VERSION                                                     \
+  "v" ASYNCTCP_VERSION_STR(ASYNCTCP_VERSION_MAJOR) "." ASYNCTCP_VERSION_STR( \
+      ASYNCTCP_VERSION_MINOR) "." ASYNCTCP_VERSION_STR(ASYNCTCP_VERSION_PATCH)

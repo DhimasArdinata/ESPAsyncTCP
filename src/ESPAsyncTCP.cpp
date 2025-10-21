@@ -82,6 +82,165 @@ extern "C" {
 #include "lwip/tcp.h"
 }
 
+// ====================================================================
+// START: New definitions for Event Queue architecture
+// ====================================================================
+
+#include "AsyncTCPSimpleIntrusiveList.h"
+
+// An enum to identify the type of network event.
+typedef enum {
+  LWIP_TCP_SENT,
+  LWIP_TCP_RECV,
+  LWIP_TCP_FIN,  // Special case for when a connection is closed by the remote
+                 // host
+  LWIP_TCP_ERROR,
+  LWIP_TCP_POLL,
+  LWIP_TCP_ACCEPT,
+  LWIP_TCP_CONNECTED,
+  LWIP_TCP_DNS
+} lwip_tcp_event_t;
+
+// A struct to hold all possible data for any network event.
+// This is designed to be allocated on the heap and passed through the queue.
+struct lwip_tcp_event_packet_t {
+  lwip_tcp_event_packet_t* next;  // Required for SimpleIntrusiveList
+  lwip_tcp_event_t event;
+  AsyncClient* client;  // The client instance this event belongs to
+
+  // A union is used to save memory, as an event can only be one type.
+  union {
+    struct {
+      tcp_pcb* pcb;
+      err_t err;
+    } connected;
+    struct {
+      err_t err;
+    } error;
+    struct {
+      tcp_pcb* pcb;
+      uint16_t len;
+    } sent;
+    struct {
+      tcp_pcb* pcb;
+      pbuf* pb;
+      err_t err;
+    } recv;
+    struct {
+      tcp_pcb* pcb;
+      err_t err;
+    } fin;
+    struct {
+      tcp_pcb* pcb;
+    } poll;
+    struct {
+      AsyncServer* server;
+      // The new AsyncClient* will be in the packet's top-level client field
+    } accept;
+    struct {
+#if LWIP_VERSION_MAJOR == 1
+      struct ip_addr addr;
+#else
+      ip_addr_t addr;
+#endif
+    } dns;
+  };
+
+  // Constructor for convenience
+  inline lwip_tcp_event_packet_t(lwip_tcp_event_t _event, AsyncClient* _client)
+      : next(nullptr), event(_event), client(_client) {};
+};
+
+// The global event queue.
+// 'static' limits its scope to this file, preventing naming conflicts.
+static SimpleIntrusiveList<lwip_tcp_event_packet_t> _async_queue;
+
+// ====================================================================
+// END: New definitions for Event Queue architecture
+// ====================================================================
+
+static void _free_event(lwip_tcp_event_packet_t* evpkt) {
+  if (!evpkt) return;
+
+  // If the event is a receive event that was never processed,
+  // we must free the associated pbuf to prevent a memory leak.
+  if ((evpkt->event == LWIP_TCP_RECV) && (evpkt->recv.pb != nullptr)) {
+    pbuf_free(evpkt->recv.pb);
+  }
+  delete evpkt;
+}
+
+// Internal helper to process a single event packet.
+// This function contains the logic that used to be in the ESP32's RTOS task.
+static void _handle_async_event(lwip_tcp_event_packet_t* e) {
+  if (e->client == nullptr) {
+    // This can happen if a client is deleted but an event for it was already in
+    // the queue. It's safe to just ignore it.
+    ASYNC_TCP_DEBUG("[EVT] Event for null client\n");
+  } else if (e->event == LWIP_TCP_RECV) {
+    // Pass the received data to the client's internal _recv method.
+    // _recv will then call the user's onData/onPacket callback.
+    e->client->_recv(e->client->getACErrorTracker(), e->recv.pcb, e->recv.pb,
+                     e->recv.err);
+    // VERY IMPORTANT: The pbuf ownership has been passed to _recv, so we null
+    // it out here to prevent _free_event from double-freeing it.
+    e->recv.pb = nullptr;
+  } else if (e->event == LWIP_TCP_FIN) {
+    // The remote side closed the connection.
+    // In our old design, this was handled inside _s_recv, but now it's a
+    // distinct event.
+    ASYNC_TCP_DEBUG("[EVT] FIN received\n");
+    e->client->_close();
+  } else if (e->event == LWIP_TCP_SENT) {
+    // An ACK was received for sent data.
+    e->client->_sent(e->client->getACErrorTracker(), e->sent.pcb, e->sent.len);
+  } else if (e->event == LWIP_TCP_POLL) {
+    // Periodic poll event.
+    e->client->_poll(e->client->getACErrorTracker(), e->poll.pcb);
+  } else if (e->event == LWIP_TCP_ERROR) {
+    // A connection error occurred.
+    e->client->_error(e->error.err);
+  } else if (e->event == LWIP_TCP_CONNECTED) {
+    // A new connection was successfully established.
+    e->client->_connected(e->client->getACErrorTracker(), e->connected.pcb,
+                          e->connected.err);
+  } else if (e->event == LWIP_TCP_ACCEPT) {
+    // The server has accepted a new client.
+    AsyncServer* server = e->accept.server;
+    AsyncClient* client = e->client;
+    if (server && client && server->_connect_cb) {
+      if (server->_noDelay)
+        tcp_nagle_disable(client->_pcb);
+      else
+        tcp_nagle_enable(client->_pcb);
+      server->_connect_cb(server->_connect_cb_arg, client);
+    }
+  } else if (e->event == LWIP_TCP_DNS) {
+    // A DNS lookup has completed.
+    e->client->_dns_found(&e->dns.addr);
+  }
+
+  // The event has been handled, now free the packet memory.
+  _free_event(e);
+}
+
+// This is the public function that users will call from their loop().
+void AsyncTCP::handle() {
+  lwip_tcp_event_packet_t* event = nullptr;
+
+  // Dequeue one event from the queue. This must be in a critical section.
+  noInterrupts();
+  if (!_async_queue.empty()) {
+    event = _async_queue.pop_front();
+  }
+  interrupts();
+
+  // If we got an event, process it.
+  if (event) {
+    _handle_async_event(event);
+  }
+}
+
 /*
   Async Client Error Return Tracker
 */
@@ -112,7 +271,9 @@ void ACErrorTracker::onErrorEvent(AsNotifyHandler cb, void* arg) {
 #endif
 
 void ACErrorTracker::setCloseError(err_t e) {
-  if (e != ERR_OK) ASYNC_TCP_DEBUG("setCloseError() to: %s(%ld)\n", _client->errorToString(e), e);
+  if (e != ERR_OK)
+    ASYNC_TCP_DEBUG("setCloseError() to: %s(%ld)\n", _client->errorToString(e),
+                    e);
   if (_errored == EE_OK) _close_error = e;
 }
 /**
@@ -271,7 +432,8 @@ bool AsyncClient::connect(const char* host, uint16_t port, bool secure) {
 bool AsyncClient::connect(const char* host, uint16_t port) {
 #endif
   IPAddress addr;
-  err_t err = dns_gethostbyname(host, addr, (dns_found_callback)&_s_dns_found, this);
+  err_t err =
+      dns_gethostbyname(host, addr, (dns_found_callback)&_s_dns_found, this);
   if (err == ERR_OK) {
 #if ASYNC_TCP_SSL_ENABLED
     return connect(addr, port, secure);
@@ -291,7 +453,8 @@ bool AsyncClient::connect(const char* host, uint16_t port) {
 
 AsyncClient& AsyncClient::operator=(const AsyncClient& other) {
   if (_pcb) {
-    ASYNC_TCP_DEBUG("operator=[%u]: Abandoned _pcb(0x%" PRIXPTR ") forced close.\n",
+    ASYNC_TCP_DEBUG("operator=[%u]: Abandoned _pcb(0x%" PRIXPTR
+                    ") forced close.\n",
                     getConnectionId(), uintptr_t(_pcb));
     _close();
   }
@@ -355,7 +518,8 @@ void AsyncClient::abort() {
 void AsyncClient::close(bool now) {
   if (_pcb) tcp_recved(_pcb, _rx_ack_len);
   if (now) {
-    ASYNC_TCP_DEBUG("close[%u]: AsyncClient 0x%" PRIXPTR "\n", getConnectionId(), uintptr_t(this));
+    ASYNC_TCP_DEBUG("close[%u]: AsyncClient 0x%" PRIXPTR "\n",
+                    getConnectionId(), uintptr_t(this));
     _close();
   } else {
     _close_pcb = true;
@@ -400,8 +564,8 @@ size_t AsyncClient::add(const char* data, size_t size, uint8_t apiflags) {
   size_t will_send = (room < size) ? room : size;
   err_t err = tcp_write(_pcb, data, will_send, apiflags);
   if (err != ERR_OK) {
-    ASYNC_TCP_DEBUG("_add[%u]: tcp_write() returned err: %s(%ld)\n", getConnectionId(),
-                    errorToString(err), err);
+    ASYNC_TCP_DEBUG("_add[%u]: tcp_write() returned err: %s(%ld)\n",
+                    getConnectionId(), errorToString(err), err);
     return 0;
   }
   _tx_unacked_len += will_send;
@@ -419,8 +583,8 @@ bool AsyncClient::send() {
     return true;
   }
 
-  ASYNC_TCP_DEBUG("send[%u]: tcp_output() returned err: %s(%ld)", getConnectionId(),
-                  errorToString(err), err);
+  ASYNC_TCP_DEBUG("send[%u]: tcp_output() returned err: %s(%ld)",
+                  getConnectionId(), errorToString(err), err);
   return false;
 }
 
@@ -433,7 +597,8 @@ size_t AsyncClient::ack(size_t len) {
 
 // Private Callbacks
 
-void AsyncClient::_connected(std::shared_ptr<ACErrorTracker>& errorTracker, void* pcb, err_t err) {
+void AsyncClient::_connected(std::shared_ptr<ACErrorTracker>& errorTracker,
+                             void* pcb, err_t err) {
   //(void)err; // LWIP v1.4 appears to always call with ERR_OK
   // Documentation for 2.1.0 also says:
   //   "err	- An unused error code, always ERR_OK currently ;-)"
@@ -441,8 +606,9 @@ void AsyncClient::_connected(std::shared_ptr<ACErrorTracker>& errorTracker, void
   // Based on that wording and emoji lets just handle it now.
   // After all, the API does allow for an err != ERR_OK.
   if (NULL == pcb || ERR_OK != err) {
-    ASYNC_TCP_DEBUG("_connected[%u]:%s err: %s(%ld)\n", errorTracker->getConnectionId(),
-                    ((NULL == pcb) ? " NULL == pcb!," : ""), errorToString(err), err);
+    ASYNC_TCP_DEBUG(
+        "_connected[%u]:%s err: %s(%ld)\n", errorTracker->getConnectionId(),
+        ((NULL == pcb) ? " NULL == pcb!," : ""), errorToString(err), err);
     errorTracker->setCloseError(err);
     errorTracker->setErrored(EE_CONNECTED_CB);
     _pcb = reinterpret_cast<tcp_pcb*>(pcb);
@@ -492,10 +658,11 @@ void AsyncClient::_close() {
     err_t err = tcp_close(_pcb);
     if (ERR_OK == err) {
       setCloseError(err);
-      ASYNC_TCP_DEBUG("_close[%u]: AsyncClient 0x%" PRIXPTR "\n", getConnectionId(),
-                      uintptr_t(this));
+      ASYNC_TCP_DEBUG("_close[%u]: AsyncClient 0x%" PRIXPTR "\n",
+                      getConnectionId(), uintptr_t(this));
     } else {
-      ASYNC_TCP_DEBUG("_close[%u]: abort() called for AsyncClient 0x%" PRIXPTR "\n",
+      ASYNC_TCP_DEBUG("_close[%u]: abort() called for AsyncClient 0x%" PRIXPTR
+                      "\n",
                       getConnectionId(), uintptr_t(this));
       abort();
     }
@@ -507,7 +674,8 @@ void AsyncClient::_close() {
 
 void AsyncClient::_error(err_t err) {
   ASYNC_TCP_DEBUG("_error[%u]:%s err: %s(%ld)\n", getConnectionId(),
-                  ((NULL == _pcb) ? " NULL == _pcb!," : ""), errorToString(err), err);
+                  ((NULL == _pcb) ? " NULL == _pcb!," : ""), errorToString(err),
+                  err);
   if (_pcb) {
 #if ASYNC_TCP_SSL_ENABLED
     if (_pcb_secure) {
@@ -528,7 +696,8 @@ void AsyncClient::_ssl_error(int8_t err) {
 }
 #endif
 
-void AsyncClient::_sent(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* pcb, uint16_t len) {
+void AsyncClient::_sent(std::shared_ptr<ACErrorTracker>& errorTracker,
+                        tcp_pcb* pcb, uint16_t len) {
   (void)pcb;
 #if ASYNC_TCP_SSL_ENABLED
   if (_pcb_secure && !_handshake_done) return;
@@ -537,7 +706,8 @@ void AsyncClient::_sent(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* 
   _tx_unacked_len -= len;
   _tx_acked_len += len;
   ASYNC_TCP_DEBUG("_sent[%u]: %4u, unacked=%4u, acked=%4u, space=%4u\n",
-                  errorTracker->getConnectionId(), len, _tx_unacked_len, _tx_acked_len, space());
+                  errorTracker->getConnectionId(), len, _tx_unacked_len,
+                  _tx_acked_len, space());
   if (_tx_unacked_len == 0) {
     _pcb_busy = false;
     errorTracker->setCloseError(ERR_OK);
@@ -550,14 +720,15 @@ void AsyncClient::_sent(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* 
   return;
 }
 
-void AsyncClient::_recv(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* pcb, pbuf* pb,
-                        err_t err) {
+void AsyncClient::_recv(std::shared_ptr<ACErrorTracker>& errorTracker,
+                        tcp_pcb* pcb, pbuf* pb, err_t err) {
   // While lwIP v1.4 appears to always call with ERR_OK, 2.x lwIP may present
   // a non-ERR_OK value.
   // https://www.nongnu.org/lwip/2_1_x/tcp_8h.html#a780cfac08b02c66948ab94ea974202e8
   if (NULL == pcb || ERR_OK != err) {
-    ASYNC_TCP_DEBUG("_recv[%u]:%s err: %s(%ld)\n", errorTracker->getConnectionId(),
-                    ((NULL == pcb) ? " NULL == pcb!," : ""), errorToString(err), err);
+    ASYNC_TCP_DEBUG(
+        "_recv[%u]:%s err: %s(%ld)\n", errorTracker->getConnectionId(),
+        ((NULL == pcb) ? " NULL == pcb!," : ""), errorToString(err), err);
     ASYNC_TCP_ASSERT(ERR_ABRT != err);
     errorTracker->setCloseError(err);
     errorTracker->setErrored(EE_RECV_CB);
@@ -590,8 +761,8 @@ void AsyncClient::_recv(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* 
   }
 
   if (pb == NULL) {
-    ASYNC_TCP_DEBUG("_recv[%u]: pb == NULL! Closing... %ld\n", errorTracker->getConnectionId(),
-                    err);
+    ASYNC_TCP_DEBUG("_recv[%u]: pb == NULL! Closing... %ld\n",
+                    errorTracker->getConnectionId(), err);
     _close();
     return;
   }
@@ -626,7 +797,8 @@ void AsyncClient::_recv(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* 
     pbuf* b = pb;
     pb = b->next;
     b->next = NULL;
-    ASYNC_TCP_DEBUG("_recv[%u]: %d%s\n", errorTracker->getConnectionId(), b->len,
+    ASYNC_TCP_DEBUG("_recv[%u]: %d%s\n", errorTracker->getConnectionId(),
+                    b->len,
                     (b->flags & PBUF_FLAG_PUSH) ? ", PBUF_FLAG_PUSH" : "");
     if (_pb_cb) {
       _pb_cb(_pb_cb_arg, this, b);
@@ -647,13 +819,15 @@ void AsyncClient::_recv(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* 
   return;
 }
 
-void AsyncClient::_poll(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* pcb) {
+void AsyncClient::_poll(std::shared_ptr<ACErrorTracker>& errorTracker,
+                        tcp_pcb* pcb) {
   (void)pcb;
   errorTracker->setCloseError(ERR_OK);
 
   // Close requested
   if (_close_pcb) {
-    ASYNC_TCP_DEBUG("_poll[%u]: Process _close_pcb.\n", errorTracker->getConnectionId());
+    ASYNC_TCP_DEBUG("_poll[%u]: Process _close_pcb.\n",
+                    errorTracker->getConnectionId());
     _close_pcb = false;
     _close();
     return;
@@ -667,15 +841,18 @@ void AsyncClient::_poll(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* 
     return;
   }
   // RX Timeout
-  if (_rx_since_timeout && (now - _rx_last_packet) >= (_rx_since_timeout * 1000)) {
-    ASYNC_TCP_DEBUG("_poll[%u]: RX Timeout.\n", errorTracker->getConnectionId());
+  if (_rx_since_timeout &&
+      (now - _rx_last_packet) >= (_rx_since_timeout * 1000)) {
+    ASYNC_TCP_DEBUG("_poll[%u]: RX Timeout.\n",
+                    errorTracker->getConnectionId());
     _close();
     return;
   }
 #if ASYNC_TCP_SSL_ENABLED
   // SSL Handshake Timeout
   if (_pcb_secure && !_handshake_done && (now - _rx_last_packet) >= 2000) {
-    ASYNC_TCP_DEBUG("_poll[%u]: SSL Handshake Timeout.\n", errorTracker->getConnectionId());
+    ASYNC_TCP_DEBUG("_poll[%u]: SSL Handshake Timeout.\n",
+                    errorTracker->getConnectionId());
     _close();
     return;
   }
@@ -703,53 +880,154 @@ void AsyncClient::_dns_found(const ip_addr* ipaddr) {
 }
 
 // lwIP Callbacks
+
 #if LWIP_VERSION_MAJOR == 1
 void AsyncClient::_s_dns_found(const char* name, ip_addr_t* ipaddr, void* arg) {
 #else
-void AsyncClient::_s_dns_found(const char* name, const ip_addr* ipaddr, void* arg) {
+void AsyncClient::_s_dns_found(const char* name, const ip_addr* ipaddr,
+                               void* arg) {
 #endif
-  (void)name;
-  reinterpret_cast<AsyncClient*>(arg)->_dns_found(ipaddr);
+  (void)name;  // name is unused
+  AsyncClient* c = reinterpret_cast<AsyncClient*>(arg);
+
+  // Create the event packet
+  lwip_tcp_event_packet_t* e =
+      new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_DNS, c};
+  if (!e) {
+    // Allocation failed. We can't do much here but it's a critical failure.
+    // The client will never connect and will eventually time out.
+    ASYNC_TCP_DEBUG("[DNS] Event allocation failed!\n");
+    return;
+  }
+
+  // Populate the packet
+  if (ipaddr) {
+    memcpy(&e->dns.addr, ipaddr, sizeof(e->dns.addr));
+  } else {
+    // If ipaddr is null, it means DNS lookup failed. Zero out the address.
+    memset(&e->dns.addr, 0, sizeof(e->dns.addr));
+  }
+
+  // Enqueue the event
+  noInterrupts();
+  _async_queue.push_back(e);
+  interrupts();
 }
 
 err_t AsyncClient::_s_poll(void* arg, struct tcp_pcb* tpcb) {
   AsyncClient* c = reinterpret_cast<AsyncClient*>(arg);
-  std::shared_ptr<ACErrorTracker> errorTracker = c->getACErrorTracker();
-  c->_poll(errorTracker, tpcb);
-  return errorTracker->getCallbackCloseError();
+
+  lwip_tcp_event_packet_t* e =
+      new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_POLL, c};
+  if (!e) {
+    // Not critical, poll is periodic. We can miss one.
+    return ERR_OK;
+  }
+  e->poll.pcb = tpcb;
+
+  noInterrupts();
+  _async_queue.push_back(e);
+  interrupts();
+
+  return ERR_OK;
 }
 
-err_t AsyncClient::_s_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* pb, err_t err) {
+err_t AsyncClient::_s_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* pb,
+                           err_t err) {
   AsyncClient* c = reinterpret_cast<AsyncClient*>(arg);
-  auto errorTracker = c->getACErrorTracker();
-  c->_recv(errorTracker, tpcb, pb, err);
-  return errorTracker->getCallbackCloseError();
+
+  lwip_tcp_event_packet_t* e;
+
+  if (pb == NULL) {
+    // This signifies the remote host has closed the connection (sent a FIN
+    // packet).
+    e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_FIN, c};
+    if (!e) {
+      return ERR_MEM;  // Let lwIP know we are out of memory
+    }
+    e->fin.pcb = tpcb;
+    e->fin.err = err;
+  } else {
+    // A regular data packet was received.
+    e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_RECV, c};
+    if (!e) {
+      pbuf_free(pb);  // We MUST free the pbuf if we can't queue it.
+      return ERR_MEM;
+    }
+    e->recv.pcb = tpcb;
+    e->recv.pb = pb;  // Transfer ownership of pbuf to the event packet
+    e->recv.err = err;
+  }
+
+  noInterrupts();
+  _async_queue.push_back(e);
+  interrupts();
+
+  return ERR_OK;
 }
 
 void AsyncClient::_s_error(void* arg, err_t err) {
   AsyncClient* c = reinterpret_cast<AsyncClient*>(arg);
-  auto errorTracker = c->getACErrorTracker();
-  errorTracker->setCloseError(err);
-  errorTracker->setErrored(EE_ERROR_CB);
-  c->_error(err);
+
+  // When an error callback occurs, lwIP has already freed the PCB.
+  // We must clear our local pointer to it to avoid use-after-free.
+  if (c) {
+    c->_pcb = nullptr;
+  }
+
+  lwip_tcp_event_packet_t* e =
+      new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_ERROR, c};
+  if (!e) {
+    return;
+  }
+  e->error.err = err;
+
+  noInterrupts();
+  _async_queue.push_back(e);
+  interrupts();
 }
 
 err_t AsyncClient::_s_sent(void* arg, struct tcp_pcb* tpcb, uint16_t len) {
   AsyncClient* c = reinterpret_cast<AsyncClient*>(arg);
-  auto errorTracker = c->getACErrorTracker();
-  c->_sent(errorTracker, tpcb, len);
-  return errorTracker->getCallbackCloseError();
+
+  lwip_tcp_event_packet_t* e =
+      new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_SENT, c};
+  if (!e) {
+    return ERR_MEM;
+  }
+  e->sent.pcb = tpcb;
+  e->sent.len = len;
+
+  noInterrupts();
+  _async_queue.push_back(e);
+  interrupts();
+
+  return ERR_OK;
 }
 
 err_t AsyncClient::_s_connected(void* arg, void* tpcb, err_t err) {
   AsyncClient* c = reinterpret_cast<AsyncClient*>(arg);
-  auto errorTracker = c->getACErrorTracker();
-  c->_connected(errorTracker, tpcb, err);
-  return errorTracker->getCallbackCloseError();
+
+  lwip_tcp_event_packet_t* e =
+      new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_CONNECTED, c};
+  if (!e) {
+    // If we can't even queue a connect event, we must abort the connection.
+    tcp_abort((tcp_pcb*)tpcb);
+    return ERR_MEM;
+  }
+  e->connected.pcb = (tcp_pcb*)tpcb;
+  e->connected.err = err;
+
+  noInterrupts();
+  _async_queue.push_back(e);
+  interrupts();
+
+  return ERR_OK;
 }
 
 #if ASYNC_TCP_SSL_ENABLED
-void AsyncClient::_s_data(void* arg, struct tcp_pcb* tcp, uint8_t* data, size_t len) {
+void AsyncClient::_s_data(void* arg, struct tcp_pcb* tcp, uint8_t* data,
+                          size_t len) {
   (void)tcp;
   AsyncClient* c = reinterpret_cast<AsyncClient*>(arg);
   if (c->_recv_cb) c->_recv_cb(c->_recv_cb_arg, c, data, len);
@@ -768,7 +1046,8 @@ void AsyncClient::_s_ssl_error(void* arg, struct tcp_pcb* tcp, int8_t err) {
 #ifdef DEBUG_ESP_ASYNC_TCP
   AsyncClient* c = reinterpret_cast<AsyncClient*>(arg);
   auto errorTracker = c->getACErrorTracker();
-  ASYNC_TCP_DEBUG("_ssl_error[%u] err = %d\n", errorTracker->getConnectionId(), err);
+  ASYNC_TCP_DEBUG("_ssl_error[%u] err = %d\n", errorTracker->getConnectionId(),
+                  err);
 #endif
   reinterpret_cast<AsyncClient*>(arg)->_ssl_error(err);
 }
@@ -789,7 +1068,9 @@ AsyncClient& AsyncClient::operator+=(const AsyncClient& other) {
   return *this;
 }
 
-void AsyncClient::setRxTimeout(uint32_t timeout) { _rx_since_timeout = timeout; }
+void AsyncClient::setRxTimeout(uint32_t timeout) {
+  _rx_since_timeout = timeout;
+}
 
 uint32_t AsyncClient::getRxTimeout() { return _rx_since_timeout; }
 
@@ -1124,7 +1405,8 @@ void AsyncServer::begin() {
 }
 
 #if ASYNC_TCP_SSL_ENABLED
-void AsyncServer::beginSecure(const char* cert, const char* key, const char* password) {
+void AsyncServer::beginSecure(const char* cert, const char* key,
+                              const char* password) {
   if (_ssl_ctx) {
     return;
   }
@@ -1165,7 +1447,8 @@ uint8_t AsyncServer::status() {
 err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err) {
   // http://savannah.nongnu.org/bugs/?43739
   if (NULL == pcb || ERR_OK != err) {
-    ASYNC_TCP_DEBUG("_accept:%s err: %ld\n", ((NULL == pcb) ? " NULL == pcb!," : ""), err);
+    ASYNC_TCP_DEBUG("_accept:%s err: %ld\n",
+                    ((NULL == pcb) ? " NULL == pcb!," : ""), err);
     ASYNC_TCP_ASSERT(ERR_ABRT != err);
     return ERR_OK;
   }
@@ -1185,10 +1468,13 @@ err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err) {
       AsyncClient* c = new (std::nothrow) AsyncClient(pcb, _ssl_ctx);
       if (c) {
         auto errorTracker = c->getACErrorTracker();
-        ASYNC_TCP_DEBUG("_accept[%u]: SSL connected\n", errorTracker->getConnectionId());
+        ASYNC_TCP_DEBUG("_accept[%u]: SSL connected\n",
+                        errorTracker->getConnectionId());
         _connect_cb(_connect_cb_arg, c);
       } else {
-        ASYNC_TCP_DEBUG("_accept[_ssl_ctx]: new AsyncClient() failed, connection aborted!\n");
+        ASYNC_TCP_DEBUG(
+            "_accept[_ssl_ctx]: new AsyncClient() failed, connection "
+            "aborted!\n");
         if (tcp_close(pcb) != ERR_OK) {
           tcp_abort(pcb);
           return ERR_ABRT;
@@ -1198,10 +1484,12 @@ err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err) {
       AsyncClient* c = new (std::nothrow) AsyncClient(pcb);
       if (c) {
         auto errorTracker = c->getACErrorTracker();
-        ASYNC_TCP_DEBUG("_accept[%u]: connected\n", errorTracker->getConnectionId());
+        ASYNC_TCP_DEBUG("_accept[%u]: connected\n",
+                        errorTracker->getConnectionId());
         _connect_cb(_connect_cb_arg, c);
       } else {
-        ASYNC_TCP_DEBUG("_accept: new AsyncClient() failed, connection aborted!\n");
+        ASYNC_TCP_DEBUG(
+            "_accept: new AsyncClient() failed, connection aborted!\n");
         if (tcp_close(pcb) != ERR_OK) {
           tcp_abort(pcb);
           return ERR_ABRT;
@@ -1212,10 +1500,12 @@ err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err) {
     AsyncClient* c = new (std::nothrow) AsyncClient(pcb);
     if (c) {
       auto errorTracker = c->getACErrorTracker();
-      ASYNC_TCP_DEBUG("_accept[%u]: connected\n", errorTracker->getConnectionId());
+      ASYNC_TCP_DEBUG("_accept[%u]: connected\n",
+                      errorTracker->getConnectionId());
       _connect_cb(_connect_cb_arg, c);
     } else {
-      ASYNC_TCP_DEBUG("_accept: new AsyncClient() failed, connection aborted!\n");
+      ASYNC_TCP_DEBUG(
+          "_accept: new AsyncClient() failed, connection aborted!\n");
       if (tcp_close(pcb) != ERR_OK) {
         tcp_abort(pcb);
         return ERR_ABRT;
@@ -1232,8 +1522,33 @@ err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err) {
   return ERR_OK;
 }
 
-err_t AsyncServer::_s_accept(void* arg, tcp_pcb* pcb, err_t err) {
-  return reinterpret_cast<AsyncServer*>(arg)->_accept(pcb, err);
+err_t AsyncServer::_s_accept(void* arg, tcp_pcb* newpcb, err_t err) {
+  AsyncServer* s = reinterpret_cast<AsyncServer*>(arg);
+
+  // On accept, we create a new client to manage the connection.
+  // The event packet will pass this new client to the main loop handler.
+  AsyncClient* c = new (std::nothrow) AsyncClient(newpcb);
+  if (!c) {
+    // Could not allocate a client wrapper. Abort the incoming connection.
+    tcp_abort(newpcb);
+    return ERR_MEM;
+  }
+
+  lwip_tcp_event_packet_t* e =
+      new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_ACCEPT, c};
+  if (!e) {
+    // Could not allocate the event. Delete the client and abort the connection.
+    delete c;
+    tcp_abort(newpcb);
+    return ERR_MEM;
+  }
+  e->accept.server = s;
+
+  noInterrupts();
+  _async_queue.push_back(e);
+  interrupts();
+
+  return ERR_OK;
 }
 
 // #if ASYNC_TCP_SSL_ENABLED
@@ -1299,9 +1614,8 @@ err_t AsyncServer::_s_accept(void* arg, tcp_pcb* pcb, err_t err) {
 //       return ERR_ABRT;
 //     }
 //   } else {
-//     // 1 ASYNC_TCP_DEBUG("### wait _recv: %u %d\n", pb->tot_len, _clients_waiting);
-//     p = _pending;
-//     while (p && p->pcb != pcb) p = p->next;
+//     // 1 ASYNC_TCP_DEBUG("### wait _recv: %u %d\n", pb->tot_len,
+//     _clients_waiting); p = _pending; while (p && p->pcb != pcb) p = p->next;
 //     if (p) {
 //       if (p->pb) {
 //         pbuf_chain(p->pb, pb);
@@ -1329,7 +1643,8 @@ err_t AsyncServer::_s_accept(void* arg, tcp_pcb* pcb, err_t err) {
 //   return reinterpret_cast<AsyncServer*>(arg)->_poll(pcb);
 // }
 
-// err_t AsyncServer::_s_recv(void* arg, struct tcp_pcb* pcb, struct pbuf* pb, err_t err) {
+// err_t AsyncServer::_s_recv(void* arg, struct tcp_pcb* pcb, struct pbuf* pb,
+// err_t err) {
 //   return reinterpret_cast<AsyncServer*>(arg)->_recv(pcb, pb, err);
 // }
 // #endif

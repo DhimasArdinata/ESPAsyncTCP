@@ -1,18 +1,17 @@
-![https://avatars.githubusercontent.com/u/195753706?s=96&v=4](https://avatars.githubusercontent.com/u/195753706?s=96&v=4)
+# Modernized & Stabilized ESPAsyncTCP for ESP8266
 
-# Modernized ESPAsyncTCP for ESP8266
-
-This is a modernized fork of the original ESPAsyncTCP library, a fully asynchronous TCP library for the ESP8266 Arduino core. This version has been significantly updated to provide robust, multi-connection networking with enhanced security and performance.
+This is a modernized fork of the original ESPAsyncTCP library, a fully asynchronous TCP library for the ESP8266 Arduino core. This version has been significantly re-architected to provide **dramatically improved stability and robustness** for multi-connection networking.
 
 ### Key Features & Enhancements
 
+- **New Architecture for Maximum Stability:** This version introduces a cooperative, event-driven model. Network events are processed safely in the main `loop()`, **preventing common crashes and watchdog timeouts** caused by long-running user code in callbacks.
 - **Modern TLS/SSL Security:** Upgraded from the outdated `axTLS` to the modern, secure `BearSSL` engine, leveraging the implementation included in the ESP8266 Arduino Core.
 - **Drastically Reduced RAM Usage:** The new BearSSL integration uses memory-efficient, configurable I/O buffers, allowing for **significantly more concurrent secure (HTTPS/WSS) clients** on the memory-constrained ESP8266.
-- **Enhanced Stability:** Resolves common `LoadStoreError` crashes by safely handling TLS certificates and private keys stored in PROGMEM (flash memory).
+- **Enhanced Crash Protection:** Resolves common `LoadStoreError` crashes by safely handling TLS certificates and private keys stored in PROGMEM (flash memory).
 - **Fully Asynchronous:** Non-blocking operations for handling multiple simultaneous connections without complex multi-threading or `delay()`.
-- **Drop-in Upgrade:** Maintains full API compatibility with the original library. **No changes are required in your application code (`.ino` sketch)** to benefit from these improvements.
+- **Simple API Update:** Requires one simple addition to your sketch to enable the new stability features, with the rest of the API remaining compatible.
 
-This library is the foundation for the powerful [ESPAsyncWebServer](https://github.com/ESP32Async/ESPAsyncWebServer).
+This library is the foundation for the powerful [ESPAsyncWebServer](https://github.com/DhimasArdinata/ESPAsyncWebServer).
 
 ---
 
@@ -36,11 +35,18 @@ lib_deps =
 
 ---
 
+### **IMPORTANT USAGE CHANGE FOR STABILITY**
+
+To enable the new, more stable architecture, you **must call `AsyncTCP::handle()` in your main `loop()` function**. This function processes pending network events safely and efficiently.
+
+Failing to call `AsyncTCP::handle()` will result in your network connections not working.
+
 ### Usage Example: A Secure HTTPS Web Server
 
-This example demonstrates how to set up a secure web server using `ESPAsyncWebServer` and this library.
+This example demonstrates how to set up a secure web server using `ESPAsyncWebServer` and this library with the required `handle()` call.
 
 **1. Generate Self-Signed Certificates**
+_(This part remains the same)_
 Run this `openssl` command on your computer to generate a certificate (`cert.pem`) and a private key (`private_key.pem`):
 
 ```bash
@@ -48,6 +54,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout private_key.pem -out cert.pem 
 ```
 
 **2. Convert Keys to C++ Headers**
+_(This part remains the same)_
 Create two header files in your project, `cert.h` and `private_key.h`, and paste the contents of the `.pem` files into them as C-style strings.
 
 `cert.h`:
@@ -105,7 +112,12 @@ void setup() {
 }
 
 void loop() {
-  // Loop is empty, everything is handled asynchronously!
+  // ** NEW REQUIRED CALL **
+  // This line processes all pending asynchronous TCP events.
+  // It should be called on every loop iteration.
+  AsyncTCP::handle();
+
+  // You can add your other non-blocking code here.
 }
 ```
 
@@ -114,17 +126,9 @@ void loop() {
 ### Library Components
 
 - **AsyncClient and AsyncServer:** The powerful, low-level base classes for raw asynchronous TCP communication.
+- **AsyncTCP:** A new static class containing the required `handle()` method for event processing.
 - **AsyncPrinter:** A `Print` interface wrapper for sending data, usable outside of async callbacks (e.g., in `loop()`).
 - **SyncClient:** A standard, blocking TCP Client for simpler, synchronous tasks, similar to the one in `ESP8266WiFi`.
-
-### Libraries and Projects that use AsyncTCP
-
-This library serves as a core dependency for many popular projects:
-
-- [ESP Async Web Server](https://github.com/ESP32Async/ESPAsyncWebServer)
-- [Async MQTT client](https://github.com/marvinroger/async-mqtt-client)
-- [arduinoWebSockets](https://github.com/Links2004/arduinoWebSockets)
-- [ESP8266 Smart Home](https://github.com/baruch/esp8266_smart_home)
 
 ---
 
